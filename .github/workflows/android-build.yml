@@ -67,3 +67,13 @@ jobs:
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BeeTransceiver-v0.8-Windows-Update-Tools
+          path: |
+            tools/Apply_Floor_Control.cmd
+            tools/Apply_Floor_Control.ps1
+            tools/Setup_Signed_Updates.cmd
+            tools/Setup_Signed_Updates.ps1
+          if-no-files-found: error
+          retention-days: 14
