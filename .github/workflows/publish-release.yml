@@ -1,0 +1,78 @@
+name: Publish signed BeeTransceiver APK
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      BEE_KEYSTORE_BASE64: ${{ secrets.BEE_KEYSTORE_BASE64 }}
+      BEE_SIGNING_STORE_PASSWORD: ${{ secrets.BEE_SIGNING_STORE_PASSWORD }}
+      BEE_SIGNING_KEY_ALIAS: ${{ secrets.BEE_SIGNING_KEY_ALIAS }}
+      BEE_SIGNING_KEY_PASSWORD: ${{ secrets.BEE_SIGNING_KEY_PASSWORD }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Ensure Android SDK 35
+        shell: bash
+        run: |
+          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+      - name: Verify permanent signing secrets
+        shell: bash
+        run: |
+          for key in BEE_KEYSTORE_BASE64 BEE_SIGNING_STORE_PASSWORD BEE_SIGNING_KEY_ALIAS BEE_SIGNING_KEY_PASSWORD; do
+            if [ -z "${!key}" ]; then
+              echo "::error::Missing required GitHub Actions secret: $key"
+              exit 1
+            fi
+          done
+          printf '%s' "$BEE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/bee-release.p12"
+          chmod 600 "$RUNNER_TEMP/bee-release.p12"
+          echo "BEE_SIGNING_FILE=$RUNNER_TEMP/bee-release.p12" >> "$GITHUB_ENV"
+      - name: Build signed APK
+        working-directory: android
+        run: gradle :app:assembleRelease --stacktrace
+      - name: Verify signature and construct release manifest
+        shell: bash
+        run: |
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          test -s "$APK"
+          "$ANDROID_SDK_ROOT/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK"
+          VERSION=$(sed -n "s/^[[:space:]]*versionName '\([^']*\)'.*/\1/p" android/app/build.gradle | head -n 1)
+          CODE=$(sed -n 's/^[[:space:]]*versionCode \([0-9][0-9]*\).*/\1/p' android/app/build.gradle | head -n 1)
+          test -n "$VERSION"
+          test -n "$CODE"
+          "$ANDROID_SDK_ROOT/build-tools/35.0.0/aapt" dump badging "$APK" | grep -q "package: name='jp.beeflat.beetransceiver.net.stable'"
+          ASSET="BeeTransceiver-v${VERSION}.apk"
+          cp "$APK" "$RUNNER_TEMP/$ASSET"
+          HASH=$(sha256sum "$RUNNER_TEMP/$ASSET" | cut -d' ' -f1)
+          jq -n --arg version "$VERSION" --argjson code "$CODE" --arg hash "$HASH" --arg apk "$ASSET" \
+            '{"versionCode":$code,"versionName":$version,"packageName":"jp.beeflat.beetransceiver.net.stable","sha256":$hash,"apkAsset":$apk}' \
+            > "$RUNNER_TEMP/update.json"
+          echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "RELEASE_ASSET=$ASSET" >> "$GITHUB_ENV"
+      - name: Publish GitHub Release
+        shell: bash
+        run: |
+          if gh release view "v${RELEASE_VERSION}" >/dev/null 2>&1; then
+            echo "::error::Release version already exists. Increase version before publishing."
+            exit 1
+          fi
+          gh release create "v${RELEASE_VERSION}" \
+            "$RUNNER_TEMP/${RELEASE_ASSET}" "$RUNNER_TEMP/update.json" \
+            --title "BeeTransceiver v${RELEASE_VERSION}" \
+            --notes "びー・トランシーバー：発言者表示、1人ずつの通話制御、アプリ内更新確認。" \
+            --target "$GITHUB_SHA"
