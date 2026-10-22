@@ -69,10 +69,16 @@ public class PttReceiverService extends Service {
     }
     private void startInternet(){
         try{
-            internetRelay=new InternetPttRelay(this,this::playInternet);
+            internetRelay=new InternetPttRelay(this,this::playInternet,this::onInternetSpeaker);
             internetRelay.start();
         }catch(Exception e){BeeLog.write(this,"ptt_internet_start_error",msg(e));}
     }
+    private void onInternetSpeaker(String speaker, boolean busy){
+        String text=busy?("発言中: "+speaker):"トランシーバー受信待機中 / 画面OFFでも受信";
+        ((NotificationManager)getSystemService(NOTIFICATION_SERVICE))
+                .notify(NOTIFICATION_ID,notification(text));
+    }
+
     private void playInternet(byte[] packet){
         try{
             if(packet.length<28 || packet[0]!='B'||packet[1]!='P'||packet[2]!='T'||packet[3]!='1')return;
