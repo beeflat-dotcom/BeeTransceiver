@@ -69,10 +69,16 @@ public class PttReceiverService extends Service {
     }
     private void startInternet(){
         try{
-            internetRelay=new InternetPttRelay(this,this::playInternet);
+            internetRelay=new InternetPttRelay(this,this::playInternet,this::onInternetSpeaker);
             internetRelay.start();
         }catch(Exception e){BeeLog.write(this,"ptt_internet_start_error",msg(e));}
     }
+    private void onInternetSpeaker(String speaker, boolean busy){
+        String text=busy?("発言中: "+speaker):"トランシーバー受信待機中 / 画面OFFでも受信";
+        ((NotificationManager)getSystemService(NOTIFICATION_SERVICE))
+                .notify(NOTIFICATION_ID,notification(text));
+    }
+
     private void playInternet(byte[] packet){
         try{
             if(packet.length<28 || packet[0]!='B'||packet[1]!='P'||packet[2]!='T'||packet[3]!='1')return;
@@ -120,7 +126,7 @@ public class PttReceiverService extends Service {
             socket=new MulticastSocket(PORT);socket.setReuseAddress(true);socket.joinGroup(group);socket.setSoTimeout(1000);
             byte[]buf=new byte[1400];DatagramPacket p=new DatagramPacket(buf,buf.length);
             while(running.get()&&enabled()){
-                try{p.setLength(buf.length);socket.receive(p);handlePacket(track,p.getData(),p.getLength());}
+                try{p.setLength(buf.length);socket.receive(p);if(!InternetPttRelay.isFloorManaged())handlePacket(track,p.getData(),p.getLength());}
                 catch(java.net.SocketTimeoutException e){if(activeRemoteSender!=null&&System.currentTimeMillis()-activeRemoteLastMs>TALKER_HOLD_MS){activeRemoteSender=null;activeRemoteName="";}}
             }
         }finally{closeSocket();if(track!=null){try{track.stop();}catch(Exception ignored){}try{track.release();}catch(Exception ignored){}}}

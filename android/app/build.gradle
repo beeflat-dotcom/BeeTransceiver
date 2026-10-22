@@ -1,6 +1,6 @@
 plugins { id 'com.android.application' }
 
-dependencies { implementation 'com.squareup.okhttp3:okhttp:4.12.0' }
+dependencies { implementation 'com.squareup.okhttp3:okhttp:4.12.0'; implementation 'androidx.core:core:1.13.1' }
 
 def beeToken=(project.findProperty('BEE_AUDIO_TOKEN') ?: System.getenv('BEE_AUDIO_TOKEN') ?: '').toString()
 def quotedToken='"' + beeToken.replace('\\','\\\\').replace('"','\\"') + '"'
@@ -9,17 +9,35 @@ android {
     namespace 'jp.beeflat.beetransceiver'
     compileSdk 35
     defaultConfig {
-        applicationId 'jp.beeflat.beetransceiver.net'
+        applicationId 'jp.beeflat.beetransceiver.net.stable'
         minSdk 26
         targetSdk 35
-        versionCode 9
-        versionName '0.7.0'
+        versionCode 10
+        versionName '0.8.0'
+        manifestPlaceholders = [beeAppLabel: 'びー・トランシーバー']
         buildConfigField 'String','BEE_AUDIO_TOKEN',quotedToken
         buildConfigField 'String','BEE_ENDPOINT_DISCOVERY_URL','"https://raw.githubusercontent.com/beeflat-dotcom/mywatch-home2/main/bee-audio/audio_external_api.json"'
     }
     buildFeatures { buildConfig true }
+    signingConfigs {
+        production {
+            def signingFile=System.getenv('BEE_SIGNING_FILE')
+            if(signingFile && file(signingFile).isFile()) {
+                storeFile file(signingFile)
+                storePassword System.getenv('BEE_SIGNING_STORE_PASSWORD')
+                keyAlias System.getenv('BEE_SIGNING_KEY_ALIAS')
+                keyPassword System.getenv('BEE_SIGNING_KEY_PASSWORD')
+            }
+        }
+    }
     buildTypes {
+        debug {
+            applicationIdSuffix '.preview'
+            versionNameSuffix '-preview'
+            manifestPlaceholders = [beeAppLabel: 'びー・トランシーバー検証']
+        }
         release {
+            signingConfig signingConfigs.production
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),'proguard-rules.pro'
         }

@@ -59,6 +59,7 @@ import android.widget.CheckBox;
 import android.widget.EditText;
 
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 
 import android.widget.TextView;
 
@@ -90,9 +91,30 @@ public class MainActivity extends Activity {
 
     private final Handler mainHandler=new Handler(Looper.getMainLooper());
 
-    private AudioEngine engine;private TextView statusView;private Button pttButton,supportButton;private EditText nameEdit,serverUrlEdit;private CheckBox mobileUploadCheck;private SharedPreferences prefs;
+    private AudioEngine engine;private TextView statusView,speakerView;private Button pttButton,supportButton,updateButton;private EditText nameEdit,serverUrlEdit;private CheckBox mobileUploadCheck;private SharedPreferences prefs;
+    private boolean pttHeld=false;
 
     private final BroadcastReceiver internetStateReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){String status=i.getStringExtra(InternetPttRelay.EXTRA_STATUS);if(statusView!=null&&status!=null)statusView.setText(status);}};
+    private final BroadcastReceiver floorStateReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){
+        String name=i.getStringExtra(InternetPttRelay.EXTRA_NAME);
+        boolean busy=i.getBooleanExtra(InternetPttRelay.EXTRA_ACTIVE,false);
+        updateSpeaker(name,busy);
+    }};
+    private final BroadcastReceiver talkResultReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){
+        String result=i.getStringExtra(InternetPttRelay.EXTRA_RESULT);
+        if("granted".equals(result)){
+            if(pttHeld)startTransmitting();
+            else InternetPttRelay.releaseTalk();
+        }else if("busy".equals(result)){
+            String name=i.getStringExtra(InternetPttRelay.EXTRA_NAME);
+            pttButton.setText("押して話す");
+            if(pttHeld)Toast.makeText(MainActivity.this,(name==null?"他の端末":name)+" が発言中です",Toast.LENGTH_SHORT).show();
+        }else if("disconnected".equals(result)){
+            if(SupportRecordingService.isRunning())SupportRecordingService.pttStop(MainActivity.this);
+            else if(engine!=null)engine.stopTransmit();
+            if(pttHeld){pttButton.setText("ネット接続が切れました");Toast.makeText(MainActivity.this,"通話が切断されました",Toast.LENGTH_SHORT).show();}
+        }
+    }};
     private final BroadcastReceiver supportStateReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){if(SupportRecordingService.ACTION_STATE.equals(i.getAction()))updateSupportButton(i.getBooleanExtra(SupportRecordingService.EXTRA_RUNNING,false));}};
 
     @Override protected void onCreate(Bundle b){super.onCreate(b);setVolumeControlStream(AudioManager.STREAM_MUSIC);prefs=getSharedPreferences(PREFS,MODE_PRIVATE);buildUi();engine=new AudioEngine(this,new AudioEngine.Listener(){public void onStatus(String t){mainHandler.post(()->statusView.setText(t));}public void onSaved(String p){mainHandler.post(()->Toast.makeText(MainActivity.this,"音声ログ保存・送信待ち: "+p,Toast.LENGTH_LONG).show());}public void onError(String m){mainHandler.post(()->{statusView.setText("エラー: "+m);Toast.makeText(MainActivity.this,m,Toast.LENGTH_LONG).show();});}});try{PttReceiverService.start(this);}catch(RuntimeException e){BeeLog.write(this,"ptt_start_error",e.toString());statusView.setText("受信起動エラー: "+e.getClass().getSimpleName());}AudioUploader.schedule(this);}
@@ -100,11 +122,21 @@ public class MainActivity extends Activity {
     private void buildUi(){int pad=dp(18);LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setPadding(pad,pad,pad,pad);root.setGravity(Gravity.CENTER_HORIZONTAL);root.setBackgroundColor(Color.rgb(250,250,250));
 
         TextView title=new TextView(this);title.setText("びー・トランシーバー");title.setTextSize(26);title.setTextColor(Color.BLACK);title.setGravity(Gravity.CENTER);root.addView(title,new LinearLayout.LayoutParams(-1,-2));
+        updateButton=new Button(this);
+        updateButton.setText("更新を確認");
+        updateButton.setAllCaps(false);
+        root.addView(updateButton,new LinearLayout.LayoutParams(-1,-2));
+        updateButton.setOnClickListener(v->AppUpdater.check(this,updateButton));
+
         Button pairButton=new Button(this);pairButton.setText(UploadConfig.token(this).isEmpty()?"ネット通話の端末登録（6桁）":"ネット通話の端末登録をやり直す");root.addView(pairButton,new LinearLayout.LayoutParams(-1,-2));pairButton.setOnClickListener(v->pairDevice());
 
         TextView sub=new TextView(this);sub.setText("画面OFFでもトランシーバー受信 / 支援録音は5分ごとにPCへ自動送信");sub.setTextSize(13);sub.setGravity(Gravity.CENTER);LinearLayout.LayoutParams slp=new LinearLayout.LayoutParams(-1,-2);slp.topMargin=dp(6);root.addView(sub,slp);
 
         nameEdit=new EditText(this);nameEdit.setSingleLine(true);nameEdit.setText(prefs.getString(PREF_NAME,defaultDeviceName()));nameEdit.setHint("端末名 例: 今店1");nameEdit.setImeOptions(EditorInfo.IME_ACTION_DONE);LinearLayout.LayoutParams nlp=new LinearLayout.LayoutParams(-1,-2);nlp.topMargin=dp(14);root.addView(nameEdit,nlp);nameEdit.setOnFocusChangeListener((v,h)->{if(!h)saveSettings();});
+        Button saveNameButton=new Button(this);
+        saveNameButton.setText("端末名を保存（再認証不要）");saveNameButton.setAllCaps(false);
+        root.addView(saveNameButton,new LinearLayout.LayoutParams(-1,-2));
+        saveNameButton.setOnClickListener(v->{saveSettings();nameEdit.clearFocus();Toast.makeText(this,"端末名を保存しました: "+currentDeviceName(),Toast.LENGTH_SHORT).show();});
 
         serverUrlEdit=new EditText(this);serverUrlEdit.setSingleLine(true);serverUrlEdit.setText(prefs.getString(UploadConfig.PREF_SERVER_URL,""));serverUrlEdit.setHint("外部API URL（空欄なら同一Wi-FiでPC自動検出）");serverUrlEdit.setTextSize(13);serverUrlEdit.setVisibility(android.view.View.GONE);root.addView(serverUrlEdit,new LinearLayout.LayoutParams(-1,-2));serverUrlEdit.setOnFocusChangeListener((v,h)->{if(!h)saveSettings();});
 
@@ -112,13 +144,61 @@ public class MainActivity extends Activity {
 
         statusView=new TextView(this);statusView.setText("受信準備中…");statusView.setTextSize(19);statusView.setTextColor(Color.DKGRAY);statusView.setGravity(Gravity.CENTER);LinearLayout.LayoutParams stlp=new LinearLayout.LayoutParams(-1,dp(62));stlp.topMargin=dp(12);root.addView(statusView,stlp);
 
+        speakerView=new TextView(this);
+        speakerView.setTextSize(21);speakerView.setTextColor(Color.rgb(98,56,12));
+        speakerView.setGravity(Gravity.CENTER);speakerView.setPadding(dp(8),dp(13),dp(8),dp(13));
+        speakerView.setBackgroundColor(Color.rgb(255,244,221));
+        LinearLayout.LayoutParams svlp=new LinearLayout.LayoutParams(-1,-2);svlp.bottomMargin=dp(10);root.addView(speakerView,svlp);
+        updateSpeaker(InternetPttRelay.currentSpeaker(),!InternetPttRelay.currentSpeaker().isEmpty());
+
         supportButton=new Button(this);supportButton.setTextSize(21);supportButton.setAllCaps(false);root.addView(supportButton,new LinearLayout.LayoutParams(-1,-2));supportButton.setOnClickListener(v->toggleSupportRecording());updateSupportButton(SupportRecordingService.isRunning());
 
-        pttButton=new Button(this);pttButton.setText("押して話す");pttButton.setTextSize(28);pttButton.setAllCaps(false);pttButton.setGravity(Gravity.CENTER);LinearLayout.LayoutParams plp=new LinearLayout.LayoutParams(-1,0,1f);plp.topMargin=dp(12);plp.bottomMargin=dp(10);root.addView(pttButton,plp);
+        pttButton=new Button(this);pttButton.setText("押して話す");pttButton.setTextSize(28);pttButton.setAllCaps(false);pttButton.setGravity(Gravity.CENTER);LinearLayout.LayoutParams plp=new LinearLayout.LayoutParams(-1,0,1f);plp.topMargin=dp(12);plp.bottomMargin=dp(10);
 
         TextView note=new TextView(this);note.setText("画面を消したりロックしても、トランシーバー受信と支援録音は継続します。支援録音は5分ごとに分割し、PCがSHA256確認したファイルだけ端末から削除します。端末自体の電源OFF中は受信できません。");note.setTextSize(12);note.setGravity(Gravity.CENTER);root.addView(note,new LinearLayout.LayoutParams(-1,-2));
 
-        pttButton.setOnTouchListener((v,e)->{switch(e.getActionMasked()){case MotionEvent.ACTION_DOWN:if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},REQ_RECORD_AUDIO);return true;}saveSettings();pttButton.setText("送信中…");if(SupportRecordingService.isRunning())SupportRecordingService.pttStart(this,currentDeviceName());else engine.startTransmit(currentDeviceName());return true;case MotionEvent.ACTION_UP:case MotionEvent.ACTION_CANCEL:if(SupportRecordingService.isRunning())SupportRecordingService.pttStop(this);else engine.stopTransmit();pttButton.setText("押して話す");return true;}return false;});setContentView(root);}
+        pttButton.setOnTouchListener((v,e)->{switch(e.getActionMasked()){
+            case MotionEvent.ACTION_DOWN:
+                if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){
+                    requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},REQ_RECORD_AUDIO);return true;
+                }
+                saveSettings();pttHeld=true;
+                int mode=InternetPttRelay.requestTalk(currentDeviceName());
+                if(mode==InternetPttRelay.MODE_MANAGED){
+                    pttButton.setText("発言許可を確認中…");
+                }else{
+                    if(mode==InternetPttRelay.MODE_OFFLINE)
+                        Toast.makeText(this,"中継サーバー未接続：同じWi-Fi内への送信のみ",Toast.LENGTH_SHORT).show();
+                    startTransmitting();
+                }
+                return true;
+            case MotionEvent.ACTION_UP:case MotionEvent.ACTION_CANCEL:
+                pttHeld=false;InternetPttRelay.releaseTalk();
+                if(SupportRecordingService.isRunning())SupportRecordingService.pttStop(this);
+                else engine.stopTransmit();
+                pttButton.setText("押して話す");return true;
+        }return false;});
+        ScrollView scroll=new ScrollView(this);scroll.addView(root);
+        LinearLayout shell=new LinearLayout(this);shell.setOrientation(LinearLayout.VERTICAL);shell.setBackgroundColor(Color.rgb(250,250,250));
+        shell.addView(scroll,new LinearLayout.LayoutParams(-1,0,1f));
+        LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,dp(118));p.setMargins(dp(12),dp(4),dp(12),dp(10));
+        shell.addView(pttButton,p);
+        setContentView(shell);
+    }
+
+    private void startTransmitting(){
+        if(!pttHeld)return;
+        pttButton.setText("送信中…");
+        if(SupportRecordingService.isRunning())SupportRecordingService.pttStart(this,currentDeviceName());
+        else engine.startTransmit(currentDeviceName());
+    }
+
+    private void updateSpeaker(String name,boolean busy){
+        if(speakerView!=null){
+            speakerView.setText(busy && name!=null&&!name.isEmpty()
+                    ? "発言中："+name : "発言者なし（待機中）");
+        }
+    }
 
     private void pairDevice(){
         EditText pin=new EditText(this);pin.setSingleLine(true);pin.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
@@ -161,11 +241,38 @@ public class MainActivity extends Activity {
 
     private void saveSettings(){prefs.edit().putString(PREF_NAME,currentDeviceName()).apply();AudioUploader.schedule(this);}
 
-    private String currentDeviceName(){String s=nameEdit.getText().toString().trim();return s.isEmpty()?defaultDeviceName():s;}private String defaultDeviceName(){return"端末-"+Build.MODEL;}private int dp(int v){return Math.round(v*getResources().getDisplayMetrics().density);}
+    private String currentDeviceName(){
+        String s=nameEdit.getText().toString().trim();
+        if(s.isEmpty())s=defaultDeviceName();
+        while(s.getBytes(StandardCharsets.UTF_8).length>48 && !s.isEmpty())
+            s=s.substring(0,s.offsetByCodePoints(s.length(),-1));
+        return s.isEmpty()?defaultDeviceName():s;
+    }private String defaultDeviceName(){return"端末-"+Build.MODEL;}private int dp(int v){return Math.round(v*getResources().getDisplayMetrics().density);}
 
-    @Override protected void onStart(){super.onStart();IntentFilter nf=new IntentFilter(InternetPttRelay.ACTION_STATUS);if(Build.VERSION.SDK_INT>=33)registerReceiver(internetStateReceiver,nf,Context.RECEIVER_NOT_EXPORTED);else registerReceiver(internetStateReceiver,nf);IntentFilter f=new IntentFilter(SupportRecordingService.ACTION_STATE);if(Build.VERSION.SDK_INT>=33)registerReceiver(supportStateReceiver,f,Context.RECEIVER_NOT_EXPORTED);else registerReceiver(supportStateReceiver,f);updateSupportButton(SupportRecordingService.isRunning());}
+    private void registerAppReceiver(BroadcastReceiver receiver,String action){
+        IntentFilter filter=new IntentFilter(action);
+        if(Build.VERSION.SDK_INT>=33)registerReceiver(receiver,filter,Context.RECEIVER_NOT_EXPORTED);
+        else registerReceiver(receiver,filter);
+    }
 
-    @Override protected void onStop(){try{unregisterReceiver(supportStateReceiver);}catch(Exception ignored){}try{unregisterReceiver(internetStateReceiver);}catch(Exception ignored){}saveSettings();super.onStop();}
+    @Override protected void onStart(){
+        super.onStart();
+        registerAppReceiver(internetStateReceiver,InternetPttRelay.ACTION_STATUS);
+        registerAppReceiver(floorStateReceiver,InternetPttRelay.ACTION_FLOOR);
+        registerAppReceiver(talkResultReceiver,InternetPttRelay.ACTION_TALK);
+        registerAppReceiver(supportStateReceiver,SupportRecordingService.ACTION_STATE);
+        updateSupportButton(SupportRecordingService.isRunning());
+        String speaker=InternetPttRelay.currentSpeaker();
+        updateSpeaker(speaker,!speaker.isEmpty());
+    }
+
+    @Override protected void onStop(){
+        try{unregisterReceiver(supportStateReceiver);}catch(Exception ignored){}
+        try{unregisterReceiver(internetStateReceiver);}catch(Exception ignored){}
+        try{unregisterReceiver(floorStateReceiver);}catch(Exception ignored){}
+        try{unregisterReceiver(talkResultReceiver);}catch(Exception ignored){}
+        saveSettings();super.onStop();
+    }
 
     @Override public void onRequestPermissionsResult(int r,String[]p,int[]g){super.onRequestPermissionsResult(r,p,g);if(r==REQ_RECORD_AUDIO)Toast.makeText(this,g.length>0&&g[0]==PackageManager.PERMISSION_GRANTED?"マイクを許可しました。もう一度ボタンを押してください。":"トランシーバーにはマイク権限が必要です。",Toast.LENGTH_LONG).show();}
 
