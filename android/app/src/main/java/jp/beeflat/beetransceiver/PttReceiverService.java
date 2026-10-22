@@ -126,7 +126,7 @@ public class PttReceiverService extends Service {
             socket=new MulticastSocket(PORT);socket.setReuseAddress(true);socket.joinGroup(group);socket.setSoTimeout(1000);
             byte[]buf=new byte[1400];DatagramPacket p=new DatagramPacket(buf,buf.length);
             while(running.get()&&enabled()){
-                try{p.setLength(buf.length);socket.receive(p);handlePacket(track,p.getData(),p.getLength());}
+                try{p.setLength(buf.length);socket.receive(p);if(!InternetPttRelay.isFloorManaged())handlePacket(track,p.getData(),p.getLength());}
                 catch(java.net.SocketTimeoutException e){if(activeRemoteSender!=null&&System.currentTimeMillis()-activeRemoteLastMs>TALKER_HOLD_MS){activeRemoteSender=null;activeRemoteName="";}}
             }
         }finally{closeSocket();if(track!=null){try{track.stop();}catch(Exception ignored){}try{track.release();}catch(Exception ignored){}}}

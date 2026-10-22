@@ -56,6 +56,10 @@ final class InternetPttRelay {
         InternetPttRelay relay=active;
         return relay!=null && relay.online;
     }
+    static boolean isFloorManaged() {
+        InternetPttRelay relay=active;
+        return relay!=null && relay.online && relay.floorSupported;
+    }
 
     private final Context context;
     private final Receiver receiver;
