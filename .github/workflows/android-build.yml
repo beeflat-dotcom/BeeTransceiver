@@ -2,13 +2,17 @@ name: BeeTransceiver Android CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature-floor-updater-20261022]
     paths:
       - "android/**"
+      - "windows/ptt_relay_api.py"
+      - "tests/**"
       - ".github/workflows/android-build.yml"
   pull_request:
     paths:
       - "android/**"
+      - "windows/ptt_relay_api.py"
+      - "tests/**"
       - ".github/workflows/android-build.yml"
   workflow_dispatch:
 
@@ -16,6 +20,20 @@ permissions:
   contents: read
 
 jobs:
+  server:
+    name: Test PTT floor control
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: python -m pip install "fastapi>=0.115,<1"
+      - name: Validate Python and run floor regression tests
+        run: |
+          python -m py_compile windows/ptt_relay_api.py windows/ptt_pair_code.py
+          python -m unittest discover -s tests -v
   android:
     name: Compile Android debug APK (testing only)
     runs-on: ubuntu-latest
@@ -38,14 +56,14 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
-      - name: Compile debug APK
+      - name: Compile preview APK
         working-directory: android
         env:
           BEE_AUDIO_TOKEN: ""
         run: gradle :app:assembleDebug --stacktrace
       - uses: actions/upload-artifact@v4
         with:
-          name: BeeTransceiver-NET-DEBUG-TEST-ONLY
+          name: BeeTransceiver-v0.8-preview-TEST
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
