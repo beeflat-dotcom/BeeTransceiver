@@ -1,0 +1,24 @@
+# Android
+.gradle/
+**/.gradle/
+**/build/
+*.iml
+local.properties
+# Secrets and signing keys
+*.keystore
+*.jks
+*.p12
+*.pem
+*.key
+**/audio_upload_token.txt
+**/ptt_pairing_code.json
+**/ptt_pairing_code.*.tmp
+.env
+.env.*
+# Private operational data
+*.m4a
+*.wav
+*.mp3
+*.log
+__pycache__/
+*.pyc
