@@ -307,6 +307,7 @@ def install_ptt_relay_api(
 
                 for _ in range(post_packets):
                     await emit(silence)
+                relay.ordered_voice.end(relay.server_voice_source)
 
                 # Let websocket writer tasks flush the final queued packet.
                 await asyncio.sleep(0.10)
@@ -329,6 +330,7 @@ def install_ptt_relay_api(
                     logging.getLogger('bee.ptt').warning(
                         'PTT audio degradation: %s', relay.last_audio_playback)
         finally:
+            relay.ordered_voice.end(relay.server_voice_source)
             wf.close()
             if timer_requested:
                 try:
@@ -344,8 +346,16 @@ def install_ptt_relay_api(
             "server_playback": True,
         }
 
+    async def _turn_reaper() -> None:
+        while relay.clients:
+            relay.ordered_voice.tick()
+            await asyncio.sleep(0.10)
+
+    turn_reaper_task: asyncio.Task | None = None
+
     @app.websocket("/ptt/ws")
     async def ptt_websocket(websocket: WebSocket):
+        nonlocal turn_reaper_task
         token = token_provider().strip()
         supplied = websocket.headers.get("authorization", "")
         if (not token or not supplied.startswith("Bearer ")
@@ -359,18 +369,43 @@ def install_ptt_relay_api(
         try:
             await websocket.accept()
             client.sender_task = asyncio.create_task(_writer(relay, client))
+            if turn_reaper_task is None or turn_reaper_task.done():
+                turn_reaper_task = asyncio.create_task(_turn_reaper())
             while True:
                 message = await websocket.receive()
                 if message.get("type") == "websocket.disconnect":
                     break
                 data = message.get("bytes")
-                if data is None:
+                if data is not None:
+                    if not client.allowed():
+                        await websocket.close(code=1008)
+                        break
+                    if _valid_packet(data):
+                        await relay.broadcast(client, bytes(data))
                     continue
-                if not client.allowed():
-                    await websocket.close(code=1008)
-                    break
-                if _valid_packet(data):
-                    await relay.broadcast(client, bytes(data))
+                body = message.get("text")
+                if not isinstance(body, str) or len(body) > 512:
+                    continue
+                try:
+                    control = json.loads(body)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(control, dict):
+                    continue
+                kind = control.get("type")
+                if kind == "hello":
+                    client.ordered = True
+                    client.control({"type": "hello_ack", "protocol": 3,
+                                    "floor_control": True, "ordered_audio": True})
+                    client.control({"type": "ptt_state", "active": False,
+                                    "name": "", "mine": False})
+                elif kind in ("ptt_start", "ptt_request"):
+                    client.ordered = True
+                    relay.ordered_voice.start(client)
+                    client.control({"type": "ptt_granted",
+                                    "name": str(control.get("name", "端末"))[:48]})
+                elif kind in ("ptt_end", "ptt_release"):
+                    relay.ordered_voice.end(client)
         except (WebSocketDisconnect, RuntimeError, OSError):
             pass
         finally:
