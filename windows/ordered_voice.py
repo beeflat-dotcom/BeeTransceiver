@@ -20,6 +20,7 @@ TURN_GAP_SECONDS = 0.50
 IDLE_END_SECONDS = 0.65
 MAX_TURN_SECONDS = 20.0
 MAX_FRAMES_PER_TURN = 1050
+MAX_FRAMES_PER_SYSTEM_TURN = 16000
 MAX_PENDING_TURNS = 12
 MAX_WAIT_SECONDS = 180.0
 
@@ -32,12 +33,13 @@ class Turn:
     started: float
     frames: list[bytes] = field(default_factory=list)
     finished: bool = False
+    is_system_voice: bool = False
     last_frame: float = field(default_factory=time.monotonic)
     signal: asyncio.Event = field(default_factory=asyncio.Event)
 
     def append(self, packet: bytes) -> None:
         if not self.finished:
-            if len(self.frames) >= MAX_FRAMES_PER_TURN:
+            if len(self.frames) >= (MAX_FRAMES_PER_SYSTEM_TURN if self.is_system_voice else MAX_FRAMES_PER_TURN):
                 self.finish()
                 return
             self.frames.append(packet)
@@ -81,7 +83,7 @@ class OrderedVoice:
         previous = self.active.pop(client, None)
         if previous is not None:
             previous.finish()
-        turn = Turn(client, time.monotonic())
+        turn = Turn(client, time.monotonic(), is_system_voice=client not in self.clients)
         self.active[client] = turn
         for peer in self.clients:
             if peer is client:
@@ -100,7 +102,7 @@ class OrderedVoice:
         if turn is None or turn.finished:
             self.start(client)
             turn = self.active[client]
-        if time.monotonic() - turn.started >= MAX_TURN_SECONDS:
+        if not turn.is_system_voice and time.monotonic() - turn.started >= MAX_TURN_SECONDS:
             turn.finish()
             return
         turn.append(bytes(packet))
@@ -113,7 +115,7 @@ class OrderedVoice:
     def tick(self) -> None:
         now = time.monotonic()
         for client, turn in list(self.active.items()):
-            if (now - turn.started >= MAX_TURN_SECONDS
+            if ((not turn.is_system_voice and now - turn.started >= MAX_TURN_SECONDS)
                     or now - turn.last_frame >= IDLE_END_SECONDS):
                 turn.finish()
                 self.active.pop(client, None)
