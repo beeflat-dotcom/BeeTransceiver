@@ -35,6 +35,7 @@ import android.media.AudioRecord;
 import android.media.AudioTrack;
 
 import android.media.MediaRecorder;
+import android.media.ToneGenerator;
 
 import android.net.wifi.WifiManager;
 
@@ -93,6 +94,8 @@ public class MainActivity extends Activity {
 
     private AudioEngine engine;private TextView statusView,speakerView;private Button pttButton,supportButton,updateButton;private EditText nameEdit,serverUrlEdit;private CheckBox mobileUploadCheck;private SharedPreferences prefs;
     private boolean pttHeld=false;
+    private final Runnable pttTimeout=()->stopPtt();
+    private final BroadcastReceiver pttReadyReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){if(pttHeld)playReadyTone();}};
 
     private final BroadcastReceiver internetStateReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){String status=i.getStringExtra(InternetPttRelay.EXTRA_STATUS);if(statusView!=null&&status!=null)statusView.setText(status);}};
     private final BroadcastReceiver floorStateReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){
@@ -107,17 +110,15 @@ public class MainActivity extends Activity {
             else InternetPttRelay.releaseTalk();
         }else if("busy".equals(result)){
             String name=i.getStringExtra(InternetPttRelay.EXTRA_NAME);
-            pttButton.setText("押して話す");
+            stopPtt();
             if(pttHeld)Toast.makeText(MainActivity.this,(name==null?"他の端末":name)+" が発言中です",Toast.LENGTH_SHORT).show();
         }else if("disconnected".equals(result)){
-            if(SupportRecordingService.isRunning())SupportRecordingService.pttStop(MainActivity.this);
-            else if(engine!=null)engine.stopTransmit();
-            if(pttHeld){pttButton.setText("ネット接続が切れました");Toast.makeText(MainActivity.this,"通話が切断されました",Toast.LENGTH_SHORT).show();}
+            if(pttHeld){stopPtt();pttButton.setText("ネット接続が切れました");Toast.makeText(MainActivity.this,"通話が切断されました",Toast.LENGTH_SHORT).show();}
         }
     }};
     private final BroadcastReceiver supportStateReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){if(SupportRecordingService.ACTION_STATE.equals(i.getAction()))updateSupportButton(i.getBooleanExtra(SupportRecordingService.EXTRA_RUNNING,false));}};
 
-    @Override protected void onCreate(Bundle b){super.onCreate(b);setVolumeControlStream(AudioManager.STREAM_MUSIC);prefs=getSharedPreferences(PREFS,MODE_PRIVATE);buildUi();engine=new AudioEngine(this,new AudioEngine.Listener(){public void onStatus(String t){mainHandler.post(()->statusView.setText(t));}public void onSaved(String p){mainHandler.post(()->Toast.makeText(MainActivity.this,"音声ログ保存・送信待ち: "+p,Toast.LENGTH_LONG).show());}public void onError(String m){mainHandler.post(()->{statusView.setText("エラー: "+m);Toast.makeText(MainActivity.this,m,Toast.LENGTH_LONG).show();});}});try{PttReceiverService.start(this);}catch(RuntimeException e){BeeLog.write(this,"ptt_start_error",e.toString());statusView.setText("受信起動エラー: "+e.getClass().getSimpleName());}AudioUploader.schedule(this);}
+    @Override protected void onCreate(Bundle b){super.onCreate(b);setVolumeControlStream(AudioManager.STREAM_MUSIC);prefs=getSharedPreferences(PREFS,MODE_PRIVATE);buildUi();engine=new AudioEngine(this,new AudioEngine.Listener(){public void onStatus(String t){mainHandler.post(()->statusView.setText(t));}public void onReady(){mainHandler.post(()->{if(pttHeld)playReadyTone();});}public void onSaved(String p){mainHandler.post(()->Toast.makeText(MainActivity.this,"音声ログ保存・送信待ち: "+p,Toast.LENGTH_LONG).show());}public void onError(String m){mainHandler.post(()->{statusView.setText("エラー: "+m);Toast.makeText(MainActivity.this,m,Toast.LENGTH_LONG).show();});}});try{PttReceiverService.start(this);}catch(RuntimeException e){BeeLog.write(this,"ptt_start_error",e.toString());statusView.setText("受信起動エラー: "+e.getClass().getSimpleName());}AudioUploader.schedule(this);}
 
     private void buildUi(){int pad=dp(18);LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setPadding(pad,pad,pad,pad);root.setGravity(Gravity.CENTER_HORIZONTAL);root.setBackgroundColor(Color.rgb(250,250,250));
 
@@ -157,7 +158,11 @@ public class MainActivity extends Activity {
 
         TextView note=new TextView(this);note.setText("画面を消したりロックしても、トランシーバー受信と支援録音は継続します。支援録音は5分ごとに分割し、PCがSHA256確認したファイルだけ端末から削除します。端末自体の電源OFF中は受信できません。");note.setTextSize(12);note.setGravity(Gravity.CENTER);root.addView(note,new LinearLayout.LayoutParams(-1,-2));
 
-        pttButton.setOnTouchListener((v,e)->{switch(e.getActionMasked()){
+        /* Button toggles: first tap starts a 20-second transmission, next tap ends. */
+        pttButton.setOnClickListener(v->togglePtt());
+        /* Previous press-and-hold handler removed. */
+        /* BEGIN_OLD_PTT_TOUCH
+        pttButton.setOnTouchListener((v,e)->{switch(e.getActionMasked()){ 
             case MotionEvent.ACTION_DOWN:
                 if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){
                     requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},REQ_RECORD_AUDIO);return true;
@@ -178,6 +183,7 @@ public class MainActivity extends Activity {
                 else engine.stopTransmit();
                 pttButton.setText("押して話す");return true;
         }return false;});
+        END_OLD_PTT_TOUCH */
         ScrollView scroll=new ScrollView(this);scroll.addView(root);
         LinearLayout shell=new LinearLayout(this);shell.setOrientation(LinearLayout.VERTICAL);shell.setBackgroundColor(Color.rgb(250,250,250));
         shell.addView(scroll,new LinearLayout.LayoutParams(-1,0,1f));
@@ -186,9 +192,46 @@ public class MainActivity extends Activity {
         setContentView(shell);
     }
 
+    private void togglePtt(){
+        if(pttHeld){stopPtt();return;}
+        if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},REQ_RECORD_AUDIO);return;
+        }
+        saveSettings();pttHeld=true;
+        mainHandler.removeCallbacks(pttTimeout);
+        mainHandler.postDelayed(pttTimeout,20000L);
+        int mode=InternetPttRelay.requestTalk(currentDeviceName());
+        if(mode==InternetPttRelay.MODE_MANAGED){
+            pttButton.setText("録音の準備中…");
+        }else{
+            if(mode==InternetPttRelay.MODE_OFFLINE)
+                Toast.makeText(this,"中継サーバー未接続：同じWi-Fi内への送信のみ",Toast.LENGTH_SHORT).show();
+            startTransmitting();
+        }
+    }
+
+    private void stopPtt(){
+        pttHeld=false;
+        mainHandler.removeCallbacks(pttTimeout);
+        InternetPttRelay.releaseTalk();
+        if(SupportRecordingService.isRunning())SupportRecordingService.pttStop(this);
+        if(engine!=null)engine.stopTransmit();
+        if(pttButton!=null)pttButton.setText("押して話す（最大20秒）");
+    }
+
+    private void playReadyTone(){
+        ToneGenerator generator=null;
+        try{
+            generator=new ToneGenerator(AudioManager.STREAM_MUSIC,70);
+            generator.startTone(ToneGenerator.TONE_PROP_BEEP,130);
+            final ToneGenerator tone=generator;
+            mainHandler.postDelayed(tone::release,400L);
+        }catch(RuntimeException ex){if(generator!=null)generator.release();}
+    }
+
     private void startTransmitting(){
         if(!pttHeld)return;
-        pttButton.setText("送信中…");
+        pttButton.setText("送信中…（再タップで終了／最大20秒）");
         if(SupportRecordingService.isRunning())SupportRecordingService.pttStart(this,currentDeviceName());
         else engine.startTransmit(currentDeviceName());
     }
@@ -261,6 +304,7 @@ public class MainActivity extends Activity {
         registerAppReceiver(floorStateReceiver,InternetPttRelay.ACTION_FLOOR);
         registerAppReceiver(talkResultReceiver,InternetPttRelay.ACTION_TALK);
         registerAppReceiver(supportStateReceiver,SupportRecordingService.ACTION_STATE);
+        registerAppReceiver(pttReadyReceiver,SupportRecordingService.ACTION_PTT_READY);
         updateSupportButton(SupportRecordingService.isRunning());
         String speaker=InternetPttRelay.currentSpeaker();
         updateSpeaker(speaker,!speaker.isEmpty());
@@ -268,6 +312,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onStop(){
         try{unregisterReceiver(supportStateReceiver);}catch(Exception ignored){}
+        try{unregisterReceiver(pttReadyReceiver);}catch(Exception ignored){}
         try{unregisterReceiver(internetStateReceiver);}catch(Exception ignored){}
         try{unregisterReceiver(floorStateReceiver);}catch(Exception ignored){}
         try{unregisterReceiver(talkResultReceiver);}catch(Exception ignored){}
@@ -276,13 +321,13 @@ public class MainActivity extends Activity {
 
     @Override public void onRequestPermissionsResult(int r,String[]p,int[]g){super.onRequestPermissionsResult(r,p,g);if(r==REQ_RECORD_AUDIO)Toast.makeText(this,g.length>0&&g[0]==PackageManager.PERMISSION_GRANTED?"マイクを許可しました。もう一度ボタンを押してください。":"トランシーバーにはマイク権限が必要です。",Toast.LENGTH_LONG).show();}
 
-    @Override protected void onDestroy(){if(engine!=null)engine.close();super.onDestroy();}
+    @Override protected void onDestroy(){stopPtt();if(engine!=null)engine.close();super.onDestroy();}
 
 
 
     static final class AudioEngine {
 
-        interface Listener{void onStatus(String t);void onSaved(String p);void onError(String m);}
+        interface Listener{void onStatus(String t);void onReady();void onSaved(String p);void onError(String m);}
 
         private static final String GROUP="239.255.42.99";private static final int PORT=45454,SAMPLE_RATE=16000,SAMPLES_PER_PACKET=320,BYTES_PER_PACKET=640;private static final byte[]MAGIC=new byte[]{'B','P','T','1'};private static final long TALKER_HOLD_MS=500;
 
@@ -294,7 +339,7 @@ public class MainActivity extends Activity {
 
         private void handlePacket(AudioTrack track,byte[]data,int length){try{if(length<28||data[0]!='B'||data[1]!='P'||data[2]!='T'||data[3]!='1')return;ByteBuffer b=ByteBuffer.wrap(data,4,length-4).order(ByteOrder.BIG_ENDIAN);int ver=b.get()&0xff;if(ver!=1)return;UUID sender=new UUID(b.getLong(),b.getLong());int seq=b.getInt();int nameLen=b.get()&0xff;if(nameLen>b.remaining())return;byte[]nb=new byte[nameLen];b.get(nb);String name=new String(nb,StandardCharsets.UTF_8);int audioLen=b.getShort()&0xffff;if(audioLen<=0||audioLen>b.remaining())return;if(sender.equals(localId))return;long now=System.currentTimeMillis();if(activeRemoteSender==null||now-activeRemoteLastMs>TALKER_HOLD_MS)activeRemoteSender=sender;if(!sender.equals(activeRemoteSender))return;activeRemoteLastMs=now;activeRemoteName=name;byte[]audio=new byte[audioLen];b.get(audio);track.write(audio,0,audio.length);if(!transmitting.get())listener.onStatus("受信中: "+name);}catch(Exception ignored){}}
 
-        void startTransmit(String deviceName){if(!transmitting.compareAndSet(false,true))return;transmitThread=new Thread(()->{AudioRecord record=null;MulticastSocket sock=null;AacM4aWriter writer=null;AudioStorage.Target target=null;try{int min=AudioRecord.getMinBufferSize(SAMPLE_RATE,AudioFormat.CHANNEL_IN_MONO,AudioFormat.ENCODING_PCM_16BIT);record=new AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION,SAMPLE_RATE,AudioFormat.CHANNEL_IN_MONO,AudioFormat.ENCODING_PCM_16BIT,Math.max(min,BYTES_PER_PACKET*8));if(record.getState()!=AudioRecord.STATE_INITIALIZED)throw new IllegalStateException("マイクを初期化できません");sock=new MulticastSocket();sock.setTimeToLive(1);InetAddress group=InetAddress.getByName(GROUP);target=AudioStorage.create(context,deviceName,"PTT",0);writer=target.openWriter();short[]samples=new short[SAMPLES_PER_PACKET];int seq=0;record.startRecording();listener.onStatus("送信中: "+deviceName);while(transmitting.get()){int n=record.read(samples,0,samples.length,AudioRecord.READ_BLOCKING);if(n<=0)continue;byte[]audio=new byte[n*2];ByteBuffer pcm=ByteBuffer.wrap(audio).order(ByteOrder.LITTLE_ENDIAN);for(int i=0;i<n;i++)pcm.putShort(samples[i]);writer.writePcm(audio,audio.length);byte[]name=trimUtf8(deviceName,48);ByteBuffer out=ByteBuffer.allocate(4+1+16+4+1+name.length+2+audio.length).order(ByteOrder.BIG_ENDIAN);out.put(MAGIC).put((byte)1).putLong(localId.getMostSignificantBits()).putLong(localId.getLeastSignificantBits()).putInt(seq++).put((byte)name.length).put(name).putShort((short)audio.length).put(audio);byte[]packet=out.array();sock.send(new DatagramPacket(packet,packet.length,group,PORT));InternetPttRelay.sendActive(packet);}}catch(Exception e){listener.onError("送信に失敗: "+msg(e));}finally{transmitting.set(false);if(record!=null){try{record.stop();}catch(Exception ignored){}try{record.release();}catch(Exception ignored){}}if(sock!=null)try{sock.close();}catch(Exception ignored){}if(writer!=null){try{writer.close();if(target!=null){AudioUploader.Item item=target.finish();AudioUploader.enqueue(context,item);listener.onSaved(item.fileName);target=null;}}catch(Exception e){if(target!=null)target.abort();}}listener.onStatus("受信待機中");}},"BeePTT-Transmit");transmitThread.start();}
+        void startTransmit(String deviceName){if(!transmitting.compareAndSet(false,true))return;transmitThread=new Thread(()->{AudioRecord record=null;MulticastSocket sock=null;AacM4aWriter writer=null;AudioStorage.Target target=null;try{int min=AudioRecord.getMinBufferSize(SAMPLE_RATE,AudioFormat.CHANNEL_IN_MONO,AudioFormat.ENCODING_PCM_16BIT);record=new AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION,SAMPLE_RATE,AudioFormat.CHANNEL_IN_MONO,AudioFormat.ENCODING_PCM_16BIT,Math.max(min,BYTES_PER_PACKET*8));if(record.getState()!=AudioRecord.STATE_INITIALIZED)throw new IllegalStateException("マイクを初期化できません");sock=new MulticastSocket();sock.setTimeToLive(1);InetAddress group=InetAddress.getByName(GROUP);target=AudioStorage.create(context,deviceName,"PTT",0);writer=target.openWriter();short[]samples=new short[SAMPLES_PER_PACKET];int seq=0;record.startRecording();if(transmitting.get())listener.onReady();listener.onStatus("送信中: "+deviceName);long stopAt=android.os.SystemClock.elapsedRealtime()+20000L;while(transmitting.get()&&android.os.SystemClock.elapsedRealtime()<stopAt){int n=record.read(samples,0,samples.length,AudioRecord.READ_BLOCKING);if(n<=0)continue;byte[]audio=new byte[n*2];ByteBuffer pcm=ByteBuffer.wrap(audio).order(ByteOrder.LITTLE_ENDIAN);for(int i=0;i<n;i++)pcm.putShort(samples[i]);writer.writePcm(audio,audio.length);byte[]name=trimUtf8(deviceName,48);ByteBuffer out=ByteBuffer.allocate(4+1+16+4+1+name.length+2+audio.length).order(ByteOrder.BIG_ENDIAN);out.put(MAGIC).put((byte)1).putLong(localId.getMostSignificantBits()).putLong(localId.getLeastSignificantBits()).putInt(seq++).put((byte)name.length).put(name).putShort((short)audio.length).put(audio);byte[]packet=out.array();sock.send(new DatagramPacket(packet,packet.length,group,PORT));InternetPttRelay.sendActive(packet);}}catch(Exception e){listener.onError("送信に失敗: "+msg(e));}finally{transmitting.set(false);if(record!=null){try{record.stop();}catch(Exception ignored){}try{record.release();}catch(Exception ignored){}}if(sock!=null)try{sock.close();}catch(Exception ignored){}if(writer!=null){try{writer.close();if(target!=null){AudioUploader.Item item=target.finish();AudioUploader.enqueue(context,item);listener.onSaved(item.fileName);target=null;}}catch(Exception e){if(target!=null)target.abort();}}listener.onStatus("受信待機中");}},"BeePTT-Transmit");transmitThread.start();}
 
         void stopTransmit(){transmitting.set(false);}void close(){transmitting.set(false);receiverRunning.set(false);if(receiveSocket!=null)receiveSocket.close();}
 
