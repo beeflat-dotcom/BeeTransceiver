@@ -61,6 +61,7 @@ public class SupportRecordingService extends Service {
     public static final String ACTION_PTT_START="jp.beeflat.beetransceiver.action.SUPPORT_PTT_START";
 
     public static final String ACTION_PTT_STOP="jp.beeflat.beetransceiver.action.SUPPORT_PTT_STOP";
+    public static final String ACTION_PTT_READY="jp.beeflat.beetransceiver.action.SUPPORT_PTT_READY";
 
     public static final String ACTION_STATE="jp.beeflat.beetransceiver.action.SUPPORT_STATE";
 
@@ -77,6 +78,8 @@ public class SupportRecordingService extends Service {
     private static final AtomicBoolean running=new AtomicBoolean(false),pttActive=new AtomicBoolean(false);
 
     private Thread worker; private volatile String deviceName="device"; private PowerManager.WakeLock wakeLock;
+    private final android.os.Handler mainHandler=new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable timeout=()->pttActive.set(false);
 
     public static boolean isRunning(){return running.get();}
 
@@ -96,9 +99,9 @@ public class SupportRecordingService extends Service {
 
         if(ACTION_STOP.equals(action)){pttActive.set(false);running.set(false);BeeLog.write(this,"support_stop","user");return START_NOT_STICKY;}
 
-        if(ACTION_PTT_START.equals(action)){if(intent!=null)deviceName=safe(intent.getStringExtra(EXTRA_DEVICE_NAME));if(running.get())pttActive.set(true);return START_STICKY;}
+        if(ACTION_PTT_START.equals(action)){if(intent!=null)deviceName=safe(intent.getStringExtra(EXTRA_DEVICE_NAME));if(running.get()){pttActive.set(true);mainHandler.removeCallbacks(timeout);mainHandler.postDelayed(timeout,20000L);sendBroadcast(new Intent(ACTION_PTT_READY).setPackage(getPackageName()));}return START_STICKY;}
 
-        if(ACTION_PTT_STOP.equals(action)){pttActive.set(false);return START_STICKY;}
+        if(ACTION_PTT_STOP.equals(action)){pttActive.set(false);mainHandler.removeCallbacks(timeout);return START_STICKY;}
 
         if(intent!=null&&intent.hasExtra(EXTRA_DEVICE_NAME)){
             deviceName=safe(intent.getStringExtra(EXTRA_DEVICE_NAME));
@@ -201,6 +204,6 @@ public class SupportRecordingService extends Service {
 
     @Override public IBinder onBind(Intent intent){return null;}
 
-    @Override public void onDestroy(){BeeLog.write(this,"support_destroy","sticky_restart="+running.get());running.set(false);pttActive.set(false);super.onDestroy();}
+    @Override public void onDestroy(){mainHandler.removeCallbacks(timeout);BeeLog.write(this,"support_destroy","sticky_restart="+running.get());running.set(false);pttActive.set(false);super.onDestroy();}
 
 }
