@@ -154,36 +154,12 @@ public class MainActivity extends Activity {
 
         supportButton=new Button(this);supportButton.setTextSize(21);supportButton.setAllCaps(false);root.addView(supportButton,new LinearLayout.LayoutParams(-1,-2));supportButton.setOnClickListener(v->toggleSupportRecording());updateSupportButton(SupportRecordingService.isRunning());
 
-        pttButton=new Button(this);pttButton.setText("押して話す");pttButton.setTextSize(28);pttButton.setAllCaps(false);pttButton.setGravity(Gravity.CENTER);LinearLayout.LayoutParams plp=new LinearLayout.LayoutParams(-1,0,1f);plp.topMargin=dp(12);plp.bottomMargin=dp(10);
+        pttButton=new Button(this);pttButton.setText("押して話す（最大20秒）");pttButton.setTextSize(28);pttButton.setAllCaps(false);pttButton.setGravity(Gravity.CENTER);LinearLayout.LayoutParams plp=new LinearLayout.LayoutParams(-1,0,1f);plp.topMargin=dp(12);plp.bottomMargin=dp(10);
 
         TextView note=new TextView(this);note.setText("画面を消したりロックしても、トランシーバー受信と支援録音は継続します。支援録音は5分ごとに分割し、PCがSHA256確認したファイルだけ端末から削除します。端末自体の電源OFF中は受信できません。");note.setTextSize(12);note.setGravity(Gravity.CENTER);root.addView(note,new LinearLayout.LayoutParams(-1,-2));
 
         /* Button toggles: first tap starts a 20-second transmission, next tap ends. */
         pttButton.setOnClickListener(v->togglePtt());
-        /* Previous press-and-hold handler removed. */
-        /* BEGIN_OLD_PTT_TOUCH
-        pttButton.setOnTouchListener((v,e)->{switch(e.getActionMasked()){ 
-            case MotionEvent.ACTION_DOWN:
-                if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){
-                    requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},REQ_RECORD_AUDIO);return true;
-                }
-                saveSettings();pttHeld=true;
-                int mode=InternetPttRelay.requestTalk(currentDeviceName());
-                if(mode==InternetPttRelay.MODE_MANAGED){
-                    pttButton.setText("発言許可を確認中…");
-                }else{
-                    if(mode==InternetPttRelay.MODE_OFFLINE)
-                        Toast.makeText(this,"中継サーバー未接続：同じWi-Fi内への送信のみ",Toast.LENGTH_SHORT).show();
-                    startTransmitting();
-                }
-                return true;
-            case MotionEvent.ACTION_UP:case MotionEvent.ACTION_CANCEL:
-                pttHeld=false;InternetPttRelay.releaseTalk();
-                if(SupportRecordingService.isRunning())SupportRecordingService.pttStop(this);
-                else engine.stopTransmit();
-                pttButton.setText("押して話す");return true;
-        }return false;});
-        END_OLD_PTT_TOUCH */
         ScrollView scroll=new ScrollView(this);scroll.addView(root);
         LinearLayout shell=new LinearLayout(this);shell.setOrientation(LinearLayout.VERTICAL);shell.setBackgroundColor(Color.rgb(250,250,250));
         shell.addView(scroll,new LinearLayout.LayoutParams(-1,0,1f));
