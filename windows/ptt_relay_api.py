@@ -21,8 +21,9 @@ from pathlib import Path
 from typing import Callable
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from ordered_voice import OrderedVoice
 
-PTT_RELAY_VERSION = "2026-10-29-ptt-ws-05-realtime-pacing"
+PTT_RELAY_VERSION = "2026-11-24-ordered-20s-preview"
 MAX_CLIENTS = 32
 MAX_PACKET = 1450
 MAX_PACKETS_PER_SECOND = 85
@@ -70,7 +71,17 @@ def _valid_packet(packet: bytes) -> bool:
 @dataclass(eq=False)
 class _Client:
     websocket: WebSocket
-    queue: asyncio.Queue[bytes] = field(default_factory=lambda: asyncio.Queue(maxsize=96))
+    queue: asyncio.Queue[bytes | str] = field(default_factory=lambda: asyncio.Queue(maxsize=96))
+    ordered: bool = False
+
+    async def send_ordered(self, packet: bytes) -> None:
+        await self.queue.put(packet)
+
+    def control(self, payload: dict) -> None:
+        try:
+            self.queue.put_nowait(json.dumps(payload, ensure_ascii=False))
+        except asyncio.QueueFull:
+            pass
     sender_task: asyncio.Task | None = None
     window: float = field(default_factory=time.monotonic)
     count: int = 0
@@ -90,17 +101,21 @@ class _Relay:
         self.playback_lock = asyncio.Lock()
         self.audio_dropped_packets = 0
         self.last_audio_playback = {}
+        self.ordered_voice = OrderedVoice()
+        self.server_voice_source = object()
 
     async def join(self, client: _Client) -> bool:
         async with self.lock:
             if len(self.clients) >= MAX_CLIENTS:
                 return False
             self.clients.add(client)
+            self.ordered_voice.join(client)
             return True
 
     async def leave(self, client: _Client) -> None:
         async with self.lock:
             self.clients.discard(client)
+        await self.ordered_voice.leave(client)
 
     async def _enqueue(self, destinations: list[_Client], data: bytes) -> None:
         for peer in destinations:
@@ -119,19 +134,20 @@ class _Relay:
     async def broadcast(self, source: _Client, data: bytes) -> None:
         async with self.lock:
             destinations = [peer for peer in self.clients if peer is not source]
-        await self._enqueue(destinations, data)
+        self.ordered_voice.audio(source, data)
 
     async def broadcast_all(self, data: bytes) -> None:
-        async with self.lock:
-            destinations = list(self.clients)
-        await self._enqueue(destinations, data)
+        self.ordered_voice.audio(self.server_voice_source, data)
 
 
 async def _writer(relay: _Relay, peer: _Client) -> None:
     try:
         while True:
             packet = await peer.queue.get()
-            await peer.websocket.send_bytes(packet)
+            if isinstance(packet, str):
+                await peer.websocket.send_text(packet)
+            else:
+                await peer.websocket.send_bytes(packet)
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -159,6 +175,8 @@ def install_ptt_relay_api(
             "websocket": "/ptt/ws", "pairing": "/ptt/pair",
             "server_playback": True, "play_wav": "/ptt/play-wav",
             "audio_dropped_packets": relay.audio_dropped_packets,
+            "ordered_audio": True, "queued_turns": relay.ordered_voice.queued(),
+            "dropped_turns": relay.ordered_voice.dropped_turns,
             "last_audio_playback": relay.last_audio_playback,
         }
 
