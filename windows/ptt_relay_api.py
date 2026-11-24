@@ -6,23 +6,55 @@ Install on the existing FastAPI Windows server behind Cloudflare Tunnel.
 from __future__ import annotations
 
 import asyncio
+import io
+import logging
+import os
 import hashlib
 import hmac
 import json
+import struct
 import time
+import uuid
+import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from ordered_voice import OrderedVoice
 
-PTT_RELAY_VERSION = "2026-10-22-ptt-floor-v02"
-NEW_CLIENT_LEASE_SECONDS = 4.0
-LEGACY_CLIENT_LEASE_SECONDS = 1.2
+PTT_RELAY_VERSION = "2026-11-24-ordered-20s-preview"
 MAX_CLIENTS = 32
 MAX_PACKET = 1450
 MAX_PACKETS_PER_SECOND = 85
 PAIRING_TTL_SECONDS = 180
+SAMPLE_RATE = 16000
+SAMPLES_PER_PACKET = 320
+PACKET_AUDIO_BYTES = 640
+PACKET_SECONDS = 0.020
+MAX_WAV_BYTES = 32 * 1024 * 1024
+SERVER_SENDER_ID = uuid.uuid5(uuid.NAMESPACE_DNS, "jp.beeflat.bee-ptt-server-playback")
+
+
+def _build_server_packet(seq: int, device_name: str, audio: bytes) -> bytes:
+    name = device_name.encode("utf-8")[:48]
+    while name:
+        try:
+            name.decode("utf-8")
+            break
+        except UnicodeDecodeError:
+            name = name[:-1]
+    if not audio or len(audio) > 1024:
+        raise ValueError("PTT audio payload must be 1..1024 bytes")
+    return b"".join([
+        b"BPT1", bytes([1]), SERVER_SENDER_ID.bytes,
+        struct.pack(">I", seq & 0xFFFFFFFF),
+        bytes([len(name)]), name,
+        struct.pack(">H", len(audio)), audio,
+    ])
+
+
+# BEE_SERVER_WAV_PLAYBACK_V1
 
 
 def _valid_packet(packet: bytes) -> bool:
@@ -39,25 +71,20 @@ def _valid_packet(packet: bytes) -> bool:
 @dataclass(eq=False)
 class _Client:
     websocket: WebSocket
-    queue: asyncio.Queue[tuple[str, bytes | str]] = field(default_factory=lambda: asyncio.Queue(maxsize=24))
-    managed: bool = False
+    queue: asyncio.Queue[bytes | str] = field(default_factory=lambda: asyncio.Queue(maxsize=96))
+    ordered: bool = False
+
+    async def send_ordered(self, packet: bytes) -> None:
+        await self.queue.put(packet)
+
+    def control(self, payload: dict) -> None:
+        try:
+            self.queue.put_nowait(json.dumps(payload, ensure_ascii=False))
+        except asyncio.QueueFull:
+            pass
     sender_task: asyncio.Task | None = None
     window: float = field(default_factory=time.monotonic)
     count: int = 0
-
-    def enqueue(self, kind: str, payload: bytes | str) -> None:
-        if self.queue.full():
-            try:
-                self.queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-        try:
-            self.queue.put_nowait((kind, payload))
-        except asyncio.QueueFull:
-            pass
-
-    def control(self, message: dict) -> None:
-        self.enqueue("text", json.dumps(message, ensure_ascii=False))
 
     def allowed(self) -> bool:
         now = time.monotonic()
@@ -67,122 +94,65 @@ class _Client:
         return self.count <= MAX_PACKETS_PER_SECOND
 
 
-def _clean_name(raw: object) -> str:
-    if not isinstance(raw, str):
-        return "端末"
-    raw = "".join(c for c in raw.strip() if c.isprintable()) or "端末"
-    while len(raw.encode("utf-8")) > 48:
-        raw = raw[:-1]
-    return raw or "端末"
-
-
 class _Relay:
     def __init__(self):
         self.clients: set[_Client] = set()
         self.lock = asyncio.Lock()
-        self.holder: _Client | None = None
-        self.holder_name = ""
-        self.last_audio = 0.0
-
-    def _publish_state_locked(self) -> None:
-        for peer in self.clients:
-            peer.control({"type": "ptt_state", "active": self.holder is not None,
-                          "name": self.holder_name if self.holder else "",
-                          "mine": self.holder is peer})
-
-    def _expire_locked(self, now: float) -> None:
-        if self.holder is None:
-            return
-        limit = NEW_CLIENT_LEASE_SECONDS if self.holder.managed else LEGACY_CLIENT_LEASE_SECONDS
-        if now - self.last_audio > limit:
-            self.holder = None
-            self.holder_name = ""
-            self.last_audio = 0.0
-            self._publish_state_locked()
+        self.playback_lock = asyncio.Lock()
+        self.audio_dropped_packets = 0
+        self.last_audio_playback = {}
+        self.ordered_voice = OrderedVoice()
+        self.server_voice_source = object()
 
     async def join(self, client: _Client) -> bool:
         async with self.lock:
             if len(self.clients) >= MAX_CLIENTS:
                 return False
             self.clients.add(client)
-            client.control({"type": "hello_ack", "protocol": 2, "floor_control": True})
-            client.control({"type": "ptt_state", "active": self.holder is not None,
-                            "name": self.holder_name if self.holder else "", "mine": False})
+            self.ordered_voice.join(client)
             return True
 
     async def leave(self, client: _Client) -> None:
         async with self.lock:
             self.clients.discard(client)
-            if self.holder is client:
-                self.holder = None
-                self.holder_name = ""
-                self.last_audio = 0.0
-                self._publish_state_locked()
+        await self.ordered_voice.leave(client)
 
-    async def request(self, client: _Client, name: object) -> None:
+    async def _enqueue(self, destinations: list[_Client], data: bytes) -> None:
+        for peer in destinations:
+            # Keep only recent audio to prevent delayed playback after congestion.
+            if peer.queue.full():
+                self.audio_dropped_packets += 1
+                try:
+                    peer.queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            try:
+                peer.queue.put_nowait(data)
+            except asyncio.QueueFull:
+                pass
+
+    async def broadcast(self, source: _Client, data: bytes) -> None:
         async with self.lock:
-            now = time.monotonic()
-            self._expire_locked(now)
-            client.managed = True
-            if self.holder is None or self.holder is client:
-                self.holder = client
-                self.holder_name = _clean_name(name)
-                self.last_audio = now
-                client.control({"type": "ptt_granted", "name": self.holder_name})
-                self._publish_state_locked()
+            destinations = [peer for peer in self.clients if peer is not source]
+        self.ordered_voice.audio(source, data)
+
+    async def broadcast_all(self, data: bytes) -> None:
+        self.ordered_voice.audio(self.server_voice_source, data)
+
+
+async def _writer(relay: _Relay, peer: _Client) -> None:
+    try:
+        while True:
+            packet = await peer.queue.get()
+            if isinstance(packet, str):
+                await peer.websocket.send_text(packet)
             else:
-                client.control({"type": "ptt_busy", "name": self.holder_name})
-
-    async def release(self, client: _Client) -> None:
-        async with self.lock:
-            if self.holder is client:
-                self.holder = None
-                self.holder_name = ""
-                self.last_audio = 0.0
-                self._publish_state_locked()
-
-    async def receive_audio(self, client: _Client, data: bytes) -> None:
-        if not _valid_packet(data):
-            return
-        async with self.lock:
-            now = time.monotonic()
-            self._expire_locked(now)
-            if self.holder is None and not client.managed:
-                # v0.7 legacy devices claim the floor with their first audio packet.
-                self.holder = client
-                length = data[25]
-                self.holder_name = _clean_name(data[26:26 + length].decode("utf-8", errors="replace"))
-                self.last_audio = now
-                self._publish_state_locked()
-            if self.holder is not client:
-                return
-            self.last_audio = now
-            for peer in self.clients:
-                if peer is not client:
-                    peer.enqueue("bytes", bytes(data))
-
-    async def expire(self) -> bool:
-        async with self.lock:
-            if not self.clients:
-                return False
-            self._expire_locked(time.monotonic())
-            return True
-
-
-async def _writer(peer: _Client) -> None:
-    while True:
-        kind, packet = await peer.queue.get()
-        if kind == "text":
-            await peer.websocket.send_text(packet)
-        else:
-            await peer.websocket.send_bytes(packet)
-
-
-async def _lease_reaper(relay: _Relay) -> None:
-    while True:
-        await asyncio.sleep(0.5)
-        if not await relay.expire():
-            return
+                await peer.websocket.send_bytes(packet)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # Dead websocket: remove immediately so other devices keep receiving.
+        await relay.leave(peer)
 
 
 def install_ptt_relay_api(
@@ -195,7 +165,6 @@ def install_ptt_relay_api(
     pairing_lock = asyncio.Lock()
     failures: dict[str, tuple[float, int]] = {}
     global_failures: tuple[float, int] = (0.0, 0)
-    reaper_task: asyncio.Task | None = None
 
     @app.get("/ptt/health")
     async def ptt_health():
@@ -203,9 +172,12 @@ def install_ptt_relay_api(
             "ok": True, "version": PTT_RELAY_VERSION,
             "auth_configured": bool(token_provider()),
             "connected_devices": len(relay.clients),
-            "floor_control": True,
-            "speaker_active": relay.holder is not None,
             "websocket": "/ptt/ws", "pairing": "/ptt/pair",
+            "server_playback": True, "play_wav": "/ptt/play-wav",
+            "audio_dropped_packets": relay.audio_dropped_packets,
+            "ordered_audio": True, "queued_turns": relay.ordered_voice.queued(),
+            "dropped_turns": relay.ordered_voice.dropped_turns,
+            "last_audio_playback": relay.last_audio_playback,
         }
 
     @app.post("/ptt/pair")
@@ -251,9 +223,139 @@ def install_ptt_relay_api(
                 raise HTTPException(status_code=500, detail="could not consume pairing code")
             return {"ok": True, "token": token, "version": PTT_RELAY_VERSION}
 
+    @app.post("/ptt/play-wav")
+    async def ptt_play_wav(request: Request):
+        """Receive a complete 16 kHz mono PCM WAV, then pace it to PTT clients."""
+        token = token_provider().strip()
+        supplied = request.headers.get("authorization", "")
+        if (not token or not supplied.startswith("Bearer ")
+                or not hmac.compare_digest(token, supplied[7:].strip())):
+            raise HTTPException(status_code=403, detail="invalid token")
+        if not relay.clients:
+            raise HTTPException(status_code=409, detail="no PTT devices connected")
+
+        body = await request.body()
+        if not body or len(body) > MAX_WAV_BYTES:
+            raise HTTPException(status_code=413, detail="WAV body missing or too large")
+
+        device_name = request.query_params.get("device_name", "びーAI").strip() or "びーAI"
+        try:
+            pre_ms = max(0, min(2000, int(request.query_params.get("pre_ms", "180"))))
+            post_ms = max(0, min(3000, int(request.query_params.get("post_ms", "260"))))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid silence duration")
+
+        try:
+            wf = wave.open(io.BytesIO(body), "rb")
+        except (wave.Error, EOFError) as exc:
+            raise HTTPException(status_code=400, detail="invalid WAV") from exc
+        timer_requested = False
+        if os.name == "nt":
+            try:
+                import ctypes
+                timer_requested = ctypes.windll.winmm.timeBeginPeriod(1) == 0
+            except Exception:
+                pass
+        try:
+            if wf.getnchannels() != 1 or wf.getsampwidth() != 2 or wf.getframerate() != SAMPLE_RATE:
+                raise HTTPException(status_code=400, detail="WAV must be 16 kHz mono 16-bit PCM")
+            frame_count = wf.getnframes()
+            if frame_count <= 0:
+                raise HTTPException(status_code=400, detail="empty WAV")
+
+            silence = b"\x00" * PACKET_AUDIO_BYTES
+            pre_packets = (pre_ms + 19) // 20
+            post_packets = (post_ms + 19) // 20
+
+            async with relay.playback_lock:
+                loop = asyncio.get_running_loop()
+                next_at = loop.time()
+                started_at = time.monotonic()
+                initial_devices = len(relay.clients)
+                dropped_before = relay.audio_dropped_packets
+                peak_lag_ms = 0.0
+                scheduler_stalls = 0
+                seq = 0
+
+                async def emit(audio: bytes) -> None:
+                    nonlocal next_at, seq, peak_lag_ms, scheduler_stalls
+                    now = loop.time()
+                    lateness = max(0.0, now - next_at)
+                    peak_lag_ms = max(peak_lag_ms, lateness * 1000.0)
+                    if lateness > 0.040:
+                        scheduler_stalls += 1
+                        # Catch up by at most 60ms. Avoid both unlimited bursts
+                        # and stretching the remainder of the WAV after a stall.
+                        next_at = now
+                    delay = next_at - now
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    await relay.broadcast_all(_build_server_packet(seq, device_name, audio))
+                    seq += 1
+                    next_at += PACKET_SECONDS
+
+                for _ in range(pre_packets):
+                    await emit(silence)
+
+                while True:
+                    audio = wf.readframes(SAMPLES_PER_PACKET)
+                    if not audio:
+                        break
+                    if len(audio) < PACKET_AUDIO_BYTES:
+                        audio += b"\x00" * (PACKET_AUDIO_BYTES - len(audio))
+                    await emit(audio)
+
+                for _ in range(post_packets):
+                    await emit(silence)
+                relay.ordered_voice.end(relay.server_voice_source)
+
+                # Let websocket writer tasks flush the final queued packet.
+                await asyncio.sleep(0.10)
+                elapsed = time.monotonic() - started_at
+                expected = seq * PACKET_SECONDS
+                relay.last_audio_playback = {
+                    "elapsed_seconds": round(elapsed, 2),
+                    "audio_seconds": round(expected, 2),
+                    "pacing_ratio": round(elapsed / expected, 2) if expected else 0,
+                    "packets": seq,
+                    "scheduler_stalls": scheduler_stalls,
+                    "peak_scheduler_lag_ms": round(peak_lag_ms, 1),
+                    "dropped_packets": relay.audio_dropped_packets - dropped_before,
+                    "devices_at_start": initial_devices,
+                    "devices_at_end": len(relay.clients),
+                }
+                if (elapsed > expected * 1.25 + 1 or
+                        relay.audio_dropped_packets > dropped_before or
+                        not relay.clients):
+                    logging.getLogger('bee.ptt').warning(
+                        'PTT audio degradation: %s', relay.last_audio_playback)
+        finally:
+            relay.ordered_voice.end(relay.server_voice_source)
+            wf.close()
+            if timer_requested:
+                try:
+                    ctypes.windll.winmm.timeEndPeriod(1)
+                except Exception:
+                    pass
+
+        return {
+            "ok": True,
+            "packets": seq,
+            "connected_devices": len(relay.clients),
+            "device_name": device_name,
+            "server_playback": True,
+        }
+
+    async def _turn_reaper() -> None:
+        while relay.clients:
+            relay.ordered_voice.tick()
+            await asyncio.sleep(0.10)
+
+    turn_reaper_task: asyncio.Task | None = None
+
     @app.websocket("/ptt/ws")
     async def ptt_websocket(websocket: WebSocket):
-        nonlocal reaper_task
+        nonlocal turn_reaper_task
         token = token_provider().strip()
         supplied = websocket.headers.get("authorization", "")
         if (not token or not supplied.startswith("Bearer ")
@@ -261,14 +363,14 @@ def install_ptt_relay_api(
             await websocket.close(code=1008)
             return
         client = _Client(websocket)
-        await websocket.accept()
         if not await relay.join(client):
             await websocket.close(code=1013)
             return
         try:
-            client.sender_task = asyncio.create_task(_writer(client))
-            if reaper_task is None or reaper_task.done():
-                reaper_task = asyncio.create_task(_lease_reaper(relay))
+            await websocket.accept()
+            client.sender_task = asyncio.create_task(_writer(relay, client))
+            if turn_reaper_task is None or turn_reaper_task.done():
+                turn_reaper_task = asyncio.create_task(_turn_reaper())
             while True:
                 message = await websocket.receive()
                 if message.get("type") == "websocket.disconnect":
@@ -278,7 +380,8 @@ def install_ptt_relay_api(
                     if not client.allowed():
                         await websocket.close(code=1008)
                         break
-                    await relay.receive_audio(client, data)
+                    if _valid_packet(data):
+                        await relay.broadcast(client, bytes(data))
                     continue
                 body = message.get("text")
                 if not isinstance(body, str) or len(body) > 512:
@@ -290,13 +393,19 @@ def install_ptt_relay_api(
                 if not isinstance(control, dict):
                     continue
                 kind = control.get("type")
-                if kind == "ptt_request":
-                    await relay.request(client, control.get("name", "端末"))
-                elif kind == "ptt_release":
-                    await relay.release(client)
-                elif kind == "hello":
-                    client.managed = True
-                    client.control({"type": "hello_ack", "protocol": 2, "floor_control": True})
+                if kind == "hello":
+                    client.ordered = True
+                    client.control({"type": "hello_ack", "protocol": 3,
+                                    "floor_control": True, "ordered_audio": True})
+                    client.control({"type": "ptt_state", "active": False,
+                                    "name": "", "mine": False})
+                elif kind in ("ptt_start", "ptt_request"):
+                    client.ordered = True
+                    relay.ordered_voice.start(client)
+                    client.control({"type": "ptt_granted",
+                                    "name": str(control.get("name", "端末"))[:48]})
+                elif kind in ("ptt_end", "ptt_release"):
+                    relay.ordered_voice.end(client)
         except (WebSocketDisconnect, RuntimeError, OSError):
             pass
         finally:
@@ -307,6 +416,8 @@ def install_ptt_relay_api(
                     await client.sender_task
                 except asyncio.CancelledError:
                     pass
-
+                except Exception:
+                    # Expected when a mobile/watch connection disappears abruptly.
+                    pass
     return relay
 
