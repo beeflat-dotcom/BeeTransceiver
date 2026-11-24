@@ -74,5 +74,5 @@ jobs:
           gh release create "v${RELEASE_VERSION}" \
             "$RUNNER_TEMP/${RELEASE_ASSET}" "$RUNNER_TEMP/update.json" \
             --title "BeeTransceiver v${RELEASE_VERSION}" \
-            --notes "びー・トランシーバー：発言者表示、1人ずつの通話制御、アプリ内更新確認。" \
+            --notes "びー・トランシーバー：20秒ワンタッチ送信、同時発話の順番再生（対応サーバーが必要）、アプリ内更新確認。既存v0.7から初回は新規インストールと端末登録が必要。" \
             --target "$GITHUB_SHA"
