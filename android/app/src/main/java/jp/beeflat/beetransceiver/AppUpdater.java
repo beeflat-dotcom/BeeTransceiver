@@ -3,6 +3,9 @@ package jp.beeflat.beetransceiver;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.Signature;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
@@ -70,7 +73,7 @@ final class AppUpdater {
                                 + "現在の端末名やペアリング情報は、同一アプリへの上書き更新なら引き継がれます。")
                         .setNegativeButton("あとで", null)
                         .setPositiveButton("ダウンロード", (dialog, which) ->
-                                download(activity, button, apkUrl, expectedHash))
+                                download(activity, button, apkUrl, expectedHash, code))
                         .show());
             } catch (Exception e) {
                 String detail = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
@@ -86,7 +89,8 @@ final class AppUpdater {
         }, "BeeUpdateCheck").start();
     }
 
-    private static void download(Activity activity, Button button, String url, String expectedHash) {
+    private static void download(Activity activity, Button button, String url, String expectedHash,
+                                 int expectedVersionCode) {
         if (Build.VERSION.SDK_INT >= 26 && !activity.getPackageManager().canRequestPackageInstalls()) {
             new AlertDialog.Builder(activity)
                     .setTitle("インストールの許可")
@@ -131,6 +135,9 @@ final class AppUpdater {
                 StringBuilder hex = new StringBuilder(64);
                 for (byte b : sha.digest()) hex.append(String.format(Locale.ROOT, "%02x", b & 0xff));
                 if (!expectedHash.equals(hex.toString())) throw new Exception("APKのSHA-256が一致しません。更新を中止しました");
+                // Check the actual APK identity before opening Android installer.
+                // A matching filename/hash is not enough to preserve an installed app.
+                verifyUpdateIdentity(activity, apk, expectedVersionCode);
 
                 File readyApk=apk;
                 activity.runOnUiThread(() -> {
@@ -159,6 +166,52 @@ final class AppUpdater {
                 });
             }
         }, "BeeUpdateDownload").start();
+    }
+
+    /**
+     * Never send an incompatible APK to Android's installer. Both the package
+     * ID and the signing certificate must match the installed app.
+     * This does not bypass Android's own signature verification.
+     */
+    private static void verifyUpdateIdentity(Activity activity, File apk,
+                                             int expectedVersionCode) throws Exception {
+        PackageManager manager = activity.getPackageManager();
+        int flags = Build.VERSION.SDK_INT >= 28
+                ? PackageManager.GET_SIGNING_CERTIFICATES : PackageManager.GET_SIGNATURES;
+        PackageInfo installed = manager.getPackageInfo(activity.getPackageName(), flags);
+        PackageInfo proposed = manager.getPackageArchiveInfo(apk.getAbsolutePath(), flags);
+        if (proposed == null) {
+            throw new Exception("更新APKを解析できません。端末のアプリは変更していません");
+        }
+        if (!activity.getPackageName().equals(proposed.packageName)) {
+            throw new Exception("更新APKが別アプリです。既存の登録を維持するため更新を中止しました");
+        }
+        long version = Build.VERSION.SDK_INT >= 28
+                ? proposed.getLongVersionCode() : proposed.versionCode;
+        if (version != expectedVersionCode) {
+            throw new Exception("更新情報とAPKのバージョンが一致しません");
+        }
+
+        Signature[] oldSigners;
+        Signature[] newSigners;
+        if (Build.VERSION.SDK_INT >= 28) {
+            oldSigners = installed.signingInfo == null ? null
+                    : installed.signingInfo.getApkContentsSigners();
+            newSigners = proposed.signingInfo == null ? null
+                    : proposed.signingInfo.getApkContentsSigners();
+        } else {
+            oldSigners = installed.signatures;
+            newSigners = proposed.signatures;
+        }
+        if (oldSigners == null || newSigners == null
+                || oldSigners.length == 0 || oldSigners.length != newSigners.length) {
+            throw new Exception("更新APKの署名を検証できません。更新を中止しました");
+        }
+        for (int i = 0; i < oldSigners.length; i++) {
+            if (!MessageDigest.isEqual(oldSigners[i].toByteArray(), newSigners[i].toByteArray())) {
+                throw new Exception("この更新APKは現在のアプリと署名が異なります。削除せず管理者に連絡してください");
+            }
+        }
     }
 
     private static String findAsset(JSONArray assets, String name) throws Exception {

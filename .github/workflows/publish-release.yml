@@ -51,6 +51,20 @@ jobs:
           APK=android/app/build/outputs/apk/release/app-release.apk
           test -s "$APK"
           "$ANDROID_SDK_ROOT/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK"
+          # Locked release identity: changing either field breaks installed-app updates.
+          # This certificate is the verified first permanent release (v0.9.0).
+          EXPECTED_PACKAGE='jp.beeflat.beetransceiver.net.stable'
+          EXPECTED_CERT='f8103e42eb212c275562db2731c7011dbdb46759c80719cea3dd4b6fbc989b13'
+          PACKAGE_LINE=$("$ANDROID_SDK_ROOT/build-tools/35.0.0/aapt" dump badging "$APK" | grep '^package:')
+          case "$PACKAGE_LINE" in
+            *"name='$EXPECTED_PACKAGE'"*) ;;
+            *) echo "::error::APK package ID changed; refusing to publish"; exit 1 ;;
+          esac
+          ACTUAL_CERT=$("$ANDROID_SDK_ROOT/build-tools/35.0.0/apksigner" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1)
+          if [ "$ACTUAL_CERT" != "$EXPECTED_CERT" ]; then
+            echo "::error::Release signing certificate changed; refusing to break app updates"
+            exit 1
+          fi
           VERSION=$(sed -n "s/^[[:space:]]*versionName '\([^']*\)'.*/\1/p" android/app/build.gradle | head -n 1)
           CODE=$(sed -n 's/^[[:space:]]*versionCode \([0-9][0-9]*\).*/\1/p' android/app/build.gradle | head -n 1)
           test -n "$VERSION"
