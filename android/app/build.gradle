@@ -17,6 +17,7 @@ android {
         versionName compatNetRelease ? '0.9.1' : '0.9.0'
         manifestPlaceholders = [beeAppLabel: 'びー・トランシーバー']
         buildConfigField 'String','BEE_AUDIO_TOKEN',quotedToken
+        buildConfigField 'boolean','BEE_LEGACY_NET_CHANNEL',compatNetRelease ? 'true' : 'false'
         buildConfigField 'String','BEE_ENDPOINT_DISCOVERY_URL','"https://raw.githubusercontent.com/beeflat-dotcom/mywatch-home2/main/bee-audio/audio_external_api.json"'
     }
     buildFeatures { buildConfig true }
