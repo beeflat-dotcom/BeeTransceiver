@@ -34,8 +34,18 @@ final class AppUpdater {
     private static final String RELEASE_PREFIX =
             "https://github.com/" + REPO + "/releases/download/";
     private static final long MAX_APK_BYTES = 90L * 1024L * 1024L;
+    private static final String LEGACY_API =
+            "https://api.github.com/repos/beeflat-dotcom/mywatch-home2/releases?per_page=40";
+    private static final String LEGACY_RELEASE_PREFIX =
+            "https://github.com/beeflat-dotcom/mywatch-home2/releases/download/";
+    private static final String LEGACY_TAG_PREFIX = "bee-ptt-net-v";
+    private static final String LEGACY_ASSET = "BeeTransceiver-NET.apk";
 
     static void check(Activity activity, Button button) {
+        if (BuildConfig.BEE_LEGACY_NET_CHANNEL) {
+            checkLegacy(activity, button);
+            return;
+        }
         button.setEnabled(false);
         button.setText("更新情報を確認中…");
         new Thread(() -> {
@@ -87,6 +97,106 @@ final class AppUpdater {
                 });
             }
         }, "BeeUpdateCheck").start();
+    }
+
+    /** Original NET channel; the on-device updater already checks this location. */
+    private static void checkLegacy(Activity activity, Button button) {
+        button.setEnabled(false);
+        button.setText("更新情報を確認中…");
+        new Thread(() -> {
+            try {
+                JSONArray releases = getJsonArray(LEGACY_API);
+                String newestVersion = null;
+                String newestUrl = null;
+                String newestHash = null;
+                for (int i = 0; i < releases.length(); i++) {
+                    JSONObject rel = releases.getJSONObject(i);
+                    if (rel.optBoolean("draft") || rel.optBoolean("prerelease")) continue;
+                    String tag = rel.optString("tag_name", "");
+                    if (!tag.startsWith(LEGACY_TAG_PREFIX)) continue;
+                    String version = tag.substring(LEGACY_TAG_PREFIX.length());
+                    if (!version.matches("[0-9]+\\.[0-9]+\\.[0-9]+")) continue;
+                    JSONArray assets = rel.optJSONArray("assets");
+                    if (assets == null) continue;
+                    for (int j = 0; j < assets.length(); j++) {
+                        JSONObject asset = assets.getJSONObject(j);
+                        if (!LEGACY_ASSET.equals(asset.optString("name"))) continue;
+                        String url = asset.optString("browser_download_url");
+                        String digest = asset.optString("digest", "").toLowerCase(Locale.ROOT);
+                        if (!url.startsWith(LEGACY_RELEASE_PREFIX)
+                                || !digest.matches("sha256:[0-9a-f]{64}")) {
+                            throw new Exception("旧通常版の更新情報が不正です");
+                        }
+                        if (newestVersion == null || compareVersions(version, newestVersion) > 0) {
+                            newestVersion = version;
+                            newestUrl = url;
+                            newestHash = digest.substring(7);
+                        }
+                    }
+                }
+                if (newestVersion == null) {
+                    throw new Exception("現在の通常版に対応した更新APKは未公開です");
+                }
+                if (compareVersions(newestVersion, BuildConfig.VERSION_NAME) <= 0) {
+                    activity.runOnUiThread(() -> new AlertDialog.Builder(activity)
+                            .setTitle("更新はありません")
+                            .setMessage("現在の版は " + BuildConfig.VERSION_NAME + " です。")
+                            .setPositiveButton("OK", null).show());
+                    return;
+                }
+                final String version = newestVersion;
+                final String url = newestUrl;
+                final String hash = newestHash;
+                activity.runOnUiThread(() -> new AlertDialog.Builder(activity)
+                        .setTitle("通常版の更新 " + version)
+                        .setMessage("同じアプリID・署名の更新APKだけをインストールします。")
+                        .setNegativeButton("あとで", null)
+                        .setPositiveButton("更新する", (d,w) ->
+                                download(activity, button, url, hash, -1))
+                        .show());
+            } catch (Exception e) {
+                String reason = e.getMessage() == null ? e.toString() : e.getMessage();
+                activity.runOnUiThread(() -> new AlertDialog.Builder(activity)
+                        .setTitle("通常版の更新情報")
+                        .setMessage(reason).setPositiveButton("OK", null).show());
+            } finally {
+                activity.runOnUiThread(() -> {
+                    button.setEnabled(true);
+                    button.setText("更新を確認");
+                });
+            }
+        }, "BeeLegacyNetUpdate").start();
+    }
+
+    private static int compareVersions(String a, String b) {
+        String[] aa = a.split("\\.");
+        String[] bb = b.split("\\.");
+        for (int i = 0; i < 3; i++) {
+            int x = i < aa.length ? Integer.parseInt(aa[i]) : 0;
+            int y = i < bb.length ? Integer.parseInt(bb[i]) : 0;
+            if (x != y) return Integer.compare(x, y);
+        }
+        return 0;
+    }
+
+    private static JSONArray getJsonArray(String address) throws Exception {
+        HttpURLConnection c = connection(address);
+        try {
+            if (c.getResponseCode() != 200)
+                throw new Exception("更新一覧の取得に失敗しました (HTTP " + c.getResponseCode() + ")");
+            if (c.getContentLengthLong() > 1024 * 1024L)
+                throw new Exception("更新一覧のサイズが不正です");
+            try (InputStream input = c.getInputStream()) {
+                byte[] bytes = new byte[1024 * 1024 + 1];
+                int used = 0, n;
+                while (used < bytes.length
+                        && (n = input.read(bytes, used, bytes.length - used)) > 0) used += n;
+                if (used >= bytes.length) throw new Exception("更新一覧が大きすぎます");
+                return new JSONArray(new String(bytes, 0, used, StandardCharsets.UTF_8));
+            }
+        } finally {
+            c.disconnect();
+        }
     }
 
     private static void download(Activity activity, Button button, String url, String expectedHash,
@@ -188,8 +298,13 @@ final class AppUpdater {
         }
         long version = Build.VERSION.SDK_INT >= 28
                 ? proposed.getLongVersionCode() : proposed.versionCode;
-        if (version != expectedVersionCode) {
+        if (expectedVersionCode > 0 && version != expectedVersionCode) {
             throw new Exception("更新情報とAPKのバージョンが一致しません");
+        }
+        long installedVersion = Build.VERSION.SDK_INT >= 28
+                ? installed.getLongVersionCode() : installed.versionCode;
+        if (version <= installedVersion) {
+            throw new Exception("APKのバージョンが現在のアプリより新しくありません");
         }
 
         Signature[] oldSigners;
