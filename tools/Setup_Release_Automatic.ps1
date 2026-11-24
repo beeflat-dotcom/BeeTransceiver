@@ -15,8 +15,8 @@ if (-not (Test-Path $gh) -or -not (Test-Path $keytool)) {
 & $gh auth status *> $null
 if ($LASTEXITCODE -ne 0) { throw 'GitHub authentication is required.' }
 New-Item -ItemType Directory -Force -Path $folder | Out-Null
-if ((Test-Path $keystore) -xor (Test-Path $protectedPassword)) {
-    throw 'Partial signing identity found; refusing to create/recreate a key.'
+if ((Test-Path $keystore) -and -not (Test-Path $protectedPassword)) {
+    throw 'Keystore exists without its DPAPI password. Refusing to replace the signing identity.'
 }
 if (-not (Test-Path $keystore)) {
     $random = New-Object byte[] 48
@@ -26,17 +26,23 @@ if (-not (Test-Path $keystore)) {
     [Array]::Clear($random, 0, $random.Length)
     $secure = ConvertTo-SecureString -String $password -AsPlainText -Force
     $secure | ConvertFrom-SecureString | Set-Content -LiteralPath $protectedPassword -Encoding ASCII
-    & $keytool -genkeypair -noprompt -alias $alias -keyalg RSA -keysize 3072 -validity 36500 -storetype PKCS12 -keystore $keystore -storepass $password -keypass $password -dname 'CN=Bee Transceiver,O=Bee Flat,C=JP' *> $null
-    if ($LASTEXITCODE -ne 0) { throw 'Could not generate the release signing key.' }
 } else {
     $secure = Get-Content -LiteralPath $protectedPassword -Raw | ConvertTo-SecureString
     $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
     try { $password = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
     finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
 }
+if (-not (Test-Path $keystore)) {
+    $ErrorActionPreference = 'Continue'
+    & $keytool -genkeypair -noprompt -alias $alias -keyalg RSA -keysize 3072 -validity 36500 -storetype PKCS12 -keystore $keystore -storepass $password -keypass $password -dname 'CN=Bee Transceiver,O=Bee Flat,C=JP' *> $null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not generate the release signing key.' }
+    $ErrorActionPreference = 'Stop'
+}
 try {
+    $ErrorActionPreference = 'Continue'
     & $keytool -list -keystore $keystore -storepass $password -alias $alias *> $null
     if ($LASTEXITCODE -ne 0) { throw 'Permanent signing key validation failed.' }
+    $ErrorActionPreference = 'Stop'
     $base64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($keystore))
     $base64 | & $gh secret set BEE_KEYSTORE_BASE64 -R $repo
     if ($LASTEXITCODE -ne 0) { throw 'Could not configure the release keystore secret.' }
