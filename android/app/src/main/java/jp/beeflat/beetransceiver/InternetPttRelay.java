@@ -289,7 +289,7 @@ final class InternetPttRelay {
                     JSONObject item=peers.optJSONObject(i);
                     if(item==null)continue;
                     String name=item.optString("name","").trim();
-                    if(!name.isEmpty())names.append("\\n・").append(name);
+                    if(!name.isEmpty())names.append("\n・").append(name);
                 }
             }
             result=names.toString();
