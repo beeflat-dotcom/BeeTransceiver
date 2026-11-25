@@ -5,6 +5,7 @@ import android.content.Intent;
 import android.os.Handler;
 import android.os.Looper;
 import org.json.JSONObject;
+import org.json.JSONArray;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -25,6 +26,8 @@ final class InternetPttRelay {
     static final String ACTION_STATUS = "jp.beeflat.beetransceiver.PTT_INTERNET_STATUS";
     static final String ACTION_FLOOR = "jp.beeflat.beetransceiver.PTT_FLOOR_STATUS";
     static final String ACTION_TALK = "jp.beeflat.beetransceiver.PTT_TALK_RESULT";
+    static final String ACTION_PEERS = "jp.beeflat.beetransceiver.PTT_CONNECTED_PEERS";
+    static final String EXTRA_PEERS = "peers";
     static final String EXTRA_STATUS = "status";
     static final String EXTRA_NAME = "name";
     static final String EXTRA_ACTIVE = "active";
@@ -52,6 +55,14 @@ final class InternetPttRelay {
         InternetPttRelay relay=active;
         return relay==null ? "" : relay.speaker;
     }
+    static String currentPeersText() {
+        InternetPttRelay relay=active;
+        return relay==null ? "接続中：確認中" : relay.rosterText;
+    }
+    static void updateMyName(String name) {
+        InternetPttRelay relay=active;
+        if(relay!=null) relay.announceName(name);
+    }
     static boolean isConnected() {
         InternetPttRelay relay=active;
         return relay!=null && relay.online;
@@ -78,6 +89,7 @@ final class InternetPttRelay {
     private volatile boolean talkWanted = false;
     private volatile boolean talkGranted = false;
     private volatile String speaker = "";
+    private volatile String rosterText = "接続中：確認中";
     private volatile long lastFailureLog = 0;
 
     InternetPttRelay(Context context, Receiver receiver, SpeakerListener speakerListener) {
@@ -97,6 +109,7 @@ final class InternetPttRelay {
         socket=null; online=false; floorSupported=false; talkWanted=false; talkGranted=false;
         connecting.set(false); handler.removeCallbacksAndMessages(null);
         changeSpeaker("",false,false);
+        changeRoster(null);
         if(old!=null)old.cancel();
         connect();
     }
@@ -176,7 +189,8 @@ final class InternetPttRelay {
                         floorSupported=false;talkWanted=false;talkGranted=false;
                         BeeLog.write(context,"ptt_internet_connected","OK");
                         status("外部通話: 接続済み");
-                        ws.send("{\"type\":\"hello\",\"protocol\":2}");
+                        announceName(context.getSharedPreferences(UploadConfig.PREFS,Context.MODE_PRIVATE)
+                                .getString("device_name","端末-"+android.os.Build.MODEL));
                     }
 
                     @Override public void onMessage(WebSocket ws,ByteString bytes){
@@ -192,6 +206,9 @@ final class InternetPttRelay {
                             JSONObject msg=new JSONObject(text);
                             String type=msg.optString("type","");
                             switch(type){
+                                case "ptt_peers":
+                                    changeRoster(msg);
+                                    break;
                                 case "hello_ack":
                                     if(msg.optBoolean("floor_control",false)){
                                         floorSupported=true;
@@ -239,6 +256,7 @@ final class InternetPttRelay {
         talkWanted=false;talkGranted=false;
         online=false;floorSupported=false;socket=null;connecting.set(false);
         changeSpeaker("",false,false);
+        changeRoster(null);
         if(wasTalking)talkEvent("disconnected","");
         EndpointDiscovery.invalidate(context);
         long now=System.currentTimeMillis();
@@ -247,6 +265,38 @@ final class InternetPttRelay {
         }
         status("外部通話: 再接続中");
         scheduleRetry(5000);
+    }
+
+    private void announceName(String name) {
+        WebSocket ws=socket;
+        if(!online || ws==null) return;
+        try {
+            ws.send(new JSONObject().put("type","hello").put("protocol",2)
+                    .put("name",name==null?"":name.trim()).toString());
+        }catch(Exception e){BeeLog.write(context,"ptt_name_announce",e.getClass().getSimpleName());}
+    }
+
+    private void changeRoster(JSONObject msg) {
+        String result;
+        if(msg==null) {
+            result="接続中：再接続中";
+        }else {
+            JSONArray peers=msg.optJSONArray("peers");
+            int count=peers==null?0:peers.length();
+            StringBuilder names=new StringBuilder("接続中：").append(count).append("台");
+            if(peers!=null){
+                for(int i=0;i<peers.length();i++){
+                    JSONObject item=peers.optJSONObject(i);
+                    if(item==null)continue;
+                    String name=item.optString("name","").trim();
+                    if(!name.isEmpty())names.append("\n・").append(name);
+                }
+            }
+            result=names.toString();
+        }
+        rosterText=result;
+        context.sendBroadcast(new Intent(ACTION_PEERS).setPackage(context.getPackageName())
+                .putExtra(EXTRA_PEERS,result));
     }
 
     private void changeSpeaker(String name,boolean busy,boolean mine){

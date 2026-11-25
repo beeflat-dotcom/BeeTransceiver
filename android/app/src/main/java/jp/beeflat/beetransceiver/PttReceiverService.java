@@ -14,6 +14,8 @@ import android.media.AudioManager;
 import android.media.AudioTrack;
 import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.IBinder;
 import android.os.PowerManager;
 import android.os.SystemClock;
@@ -42,6 +44,15 @@ public class PttReceiverService extends Service {
     private InternetPttRelay internetRelay;
     private AudioTrack internetTrack;
     private final Object internetAudioLock=new Object();
+    private final Handler speakerHandler=new Handler(Looper.getMainLooper());
+    private volatile String currentInternetTalker="";
+    private final Runnable clearInternetSpeaker=()->{
+        currentInternetTalker="";
+        sendBroadcast(new Intent(InternetPttRelay.ACTION_FLOOR).setPackage(getPackageName())
+                .putExtra(InternetPttRelay.EXTRA_NAME,"")
+                .putExtra(InternetPttRelay.EXTRA_ACTIVE,false));
+        onInternetSpeaker("",false);
+    };
     private UUID localId,activeRemoteSender; private long activeRemoteLastMs; private String activeRemoteName="";
 
     public static void start(Context c){
@@ -89,9 +100,11 @@ public class PttReceiverService extends Service {
             b.getInt();int nameLength=b.get()&255;
             if(nameLength>b.remaining()-2)return;
             byte[] nameBytes=new byte[nameLength];b.get(nameBytes);
+            String talker=new String(nameBytes,java.nio.charset.StandardCharsets.UTF_8);
             int len=b.getShort()&65535;
             if(len<=0||len>b.remaining())return;
             byte[] pcm=new byte[len];b.get(pcm);
+            noteInternetSpeaker(talker);
             synchronized(internetAudioLock){
                 if(internetTrack==null){
                     int min=AudioTrack.getMinBufferSize(SAMPLE_RATE,AudioFormat.CHANNEL_OUT_MONO,AudioFormat.ENCODING_PCM_16BIT);
@@ -102,6 +115,17 @@ public class PttReceiverService extends Service {
                 internetTrack.write(pcm,0,len);
             }
         }catch(Exception e){BeeLog.write(this,"ptt_internet_play_error",msg(e));}
+    }
+    private void noteInternetSpeaker(String name){
+        if(!name.equals(currentInternetTalker)){
+            currentInternetTalker=name;
+            sendBroadcast(new Intent(InternetPttRelay.ACTION_FLOOR).setPackage(getPackageName())
+                    .putExtra(InternetPttRelay.EXTRA_NAME,name)
+                    .putExtra(InternetPttRelay.EXTRA_ACTIVE,true));
+            onInternetSpeaker(name,true);
+        }
+        speakerHandler.removeCallbacks(clearInternetSpeaker);
+        speakerHandler.postDelayed(clearInternetSpeaker,1100L);
     }
     private void startWorker(){worker=new Thread(()->{
         int failures=0;
@@ -163,7 +187,7 @@ public class PttReceiverService extends Service {
                 .addAction(new Notification.Action.Builder(android.R.drawable.ic_menu_close_clear_cancel,"受信停止",stop).build()).build();
     }
     @Override public void onTaskRemoved(Intent rootIntent){BeeLog.write(this,"ptt_rx_task_removed","enabled="+enabled());super.onTaskRemoved(rootIntent);}
-    @Override public void onDestroy(){running.set(false);if(internetRelay!=null)internetRelay.stop();synchronized(internetAudioLock){if(internetTrack!=null){try{internetTrack.stop();}catch(Exception ignored){}internetTrack.release();internetTrack=null;}}closeSocket();releaseLocks();BeeLog.write(this,"ptt_rx_destroy","enabled="+enabled());super.onDestroy();}
+    @Override public void onDestroy(){speakerHandler.removeCallbacks(clearInternetSpeaker);running.set(false);if(internetRelay!=null)internetRelay.stop();synchronized(internetAudioLock){if(internetTrack!=null){try{internetTrack.stop();}catch(Exception ignored){}internetTrack.release();internetTrack=null;}}closeSocket();releaseLocks();BeeLog.write(this,"ptt_rx_destroy","enabled="+enabled());super.onDestroy();}
     private static String msg(Exception e){String m=e.getMessage();return m==null||m.trim().isEmpty()?e.getClass().getSimpleName():m;}
     @Override public IBinder onBind(Intent intent){return null;}
 }

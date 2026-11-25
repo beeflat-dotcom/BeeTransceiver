@@ -92,7 +92,7 @@ public class MainActivity extends Activity {
 
     private final Handler mainHandler=new Handler(Looper.getMainLooper());
 
-    private AudioEngine engine;private TextView statusView,speakerView;private Button pttButton,supportButton,updateButton;private EditText nameEdit,serverUrlEdit;private CheckBox mobileUploadCheck;private SharedPreferences prefs;
+    private AudioEngine engine;private TextView statusView,speakerView,rosterView;private Button pttButton,supportButton,updateButton;private EditText nameEdit,serverUrlEdit;private CheckBox mobileUploadCheck;private SharedPreferences prefs;
     private boolean pttHeld=false;
     private final Runnable pttTimeout=()->stopPtt();
     private final BroadcastReceiver pttReadyReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){if(pttHeld)playReadyTone();}};
@@ -102,6 +102,10 @@ public class MainActivity extends Activity {
         String name=i.getStringExtra(InternetPttRelay.EXTRA_NAME);
         boolean busy=i.getBooleanExtra(InternetPttRelay.EXTRA_ACTIVE,false);
         updateSpeaker(name,busy);
+    }};
+    private final BroadcastReceiver rosterReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){
+        String names=i.getStringExtra(InternetPttRelay.EXTRA_PEERS);
+        if(rosterView!=null&&names!=null)rosterView.setText(names);
     }};
     private final BroadcastReceiver talkResultReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){
         String result=i.getStringExtra(InternetPttRelay.EXTRA_RESULT);
@@ -151,6 +155,21 @@ public class MainActivity extends Activity {
         speakerView.setBackgroundColor(Color.rgb(255,244,221));
         LinearLayout.LayoutParams svlp=new LinearLayout.LayoutParams(-1,-2);svlp.bottomMargin=dp(10);root.addView(speakerView,svlp);
         updateSpeaker(InternetPttRelay.currentSpeaker(),!InternetPttRelay.currentSpeaker().isEmpty());
+
+        TextView destination=new TextView(this);
+        destination.setText("発言先：接続中の全員");
+        destination.setTextSize(15);destination.setTextColor(Color.DKGRAY);
+        destination.setGravity(Gravity.CENTER);
+        root.addView(destination,new LinearLayout.LayoutParams(-1,-2));
+
+        rosterView=new TextView(this);
+        rosterView.setTextSize(16);rosterView.setTextColor(Color.rgb(20,60,83));
+        rosterView.setPadding(dp(14),dp(10),dp(14),dp(10));
+        rosterView.setBackgroundColor(Color.rgb(233,244,250));
+        rosterView.setText(InternetPttRelay.currentPeersText());
+        LinearLayout.LayoutParams rosterParams=new LinearLayout.LayoutParams(-1,-2);
+        rosterParams.topMargin=dp(6);rosterParams.bottomMargin=dp(10);
+        root.addView(rosterView,rosterParams);
 
         supportButton=new Button(this);supportButton.setTextSize(21);supportButton.setAllCaps(false);root.addView(supportButton,new LinearLayout.LayoutParams(-1,-2));supportButton.setOnClickListener(v->toggleSupportRecording());updateSupportButton(SupportRecordingService.isRunning());
 
@@ -208,6 +227,7 @@ public class MainActivity extends Activity {
     private void startTransmitting(){
         if(!pttHeld)return;
         pttButton.setText("送信中…（再タップで終了／最大20秒）");
+        updateSpeaker(currentDeviceName(),true);
         if(SupportRecordingService.isRunning())SupportRecordingService.pttStart(this,currentDeviceName());
         else engine.startTransmit(currentDeviceName());
     }
@@ -258,7 +278,7 @@ public class MainActivity extends Activity {
 
     private void updateSupportButton(boolean r){if(supportButton==null)return;supportButton.setText(r?"支援時間 録音中（押して終了）":"支援時間 開始");if(statusView!=null)statusView.setText(r?"支援時間を録音中 / 約4MBで自動分割":"受信待機中");}
 
-    private void saveSettings(){prefs.edit().putString(PREF_NAME,currentDeviceName()).apply();AudioUploader.schedule(this);}
+    private void saveSettings(){String name=currentDeviceName();prefs.edit().putString(PREF_NAME,name).apply();InternetPttRelay.updateMyName(name);AudioUploader.schedule(this);}
 
     private String currentDeviceName(){
         String s=nameEdit.getText().toString().trim();
@@ -279,11 +299,13 @@ public class MainActivity extends Activity {
         registerAppReceiver(internetStateReceiver,InternetPttRelay.ACTION_STATUS);
         registerAppReceiver(floorStateReceiver,InternetPttRelay.ACTION_FLOOR);
         registerAppReceiver(talkResultReceiver,InternetPttRelay.ACTION_TALK);
+        registerAppReceiver(rosterReceiver,InternetPttRelay.ACTION_PEERS);
         registerAppReceiver(supportStateReceiver,SupportRecordingService.ACTION_STATE);
         registerAppReceiver(pttReadyReceiver,SupportRecordingService.ACTION_PTT_READY);
         updateSupportButton(SupportRecordingService.isRunning());
         String speaker=InternetPttRelay.currentSpeaker();
         updateSpeaker(speaker,!speaker.isEmpty());
+        if(rosterView!=null)rosterView.setText(InternetPttRelay.currentPeersText());
     }
 
     @Override protected void onStop(){
@@ -292,6 +314,7 @@ public class MainActivity extends Activity {
         try{unregisterReceiver(internetStateReceiver);}catch(Exception ignored){}
         try{unregisterReceiver(floorStateReceiver);}catch(Exception ignored){}
         try{unregisterReceiver(talkResultReceiver);}catch(Exception ignored){}
+        try{unregisterReceiver(rosterReceiver);}catch(Exception ignored){}
         saveSettings();super.onStop();
     }
 
