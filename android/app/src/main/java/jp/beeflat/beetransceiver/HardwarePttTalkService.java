@@ -63,6 +63,7 @@ public final class HardwarePttTalkService extends Service {
     private final Runnable timeout=this::finish;
     private BroadcastReceiver floorReceiver;
     private BroadcastReceiver supportReadyReceiver;
+    private BluetoothMediaPtt bluetoothMedia;
 
     static boolean isArmed(){
         HardwarePttTalkService service=active;
@@ -139,7 +140,16 @@ public final class HardwarePttTalkService extends Service {
                 startForeground(NOTIFY_ID,n,ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
             else startForeground(NOTIFY_ID,n);
             armed=true;
-            publish("待機中");
+            try {
+                if(bluetoothMedia==null)
+                    bluetoothMedia=new BluetoothMediaPtt(this,()->{
+                        if(armed)toggle(true);
+                    });
+                bluetoothMedia.start();
+            }catch(RuntimeException e){
+                BeeLog.write(this,"bt_media_ptt_start_error",e.getClass().getSimpleName());
+            }
+            publish("待機中（Bluetooth再生/停止ボタン対応）");
         }catch(RuntimeException error){
             BeeLog.write(this,"hardware_ptt_fg_error",error.getClass().getSimpleName());
             shutdown();
@@ -345,6 +355,10 @@ public final class HardwarePttTalkService extends Service {
     private void shutdown(){
         finish();
         armed=false;
+        if(bluetoothMedia!=null){
+            bluetoothMedia.stop();
+            bluetoothMedia=null;
+        }
         active=null;
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
@@ -354,6 +368,10 @@ public final class HardwarePttTalkService extends Service {
     @Override public void onDestroy(){
         finish();
         armed=false;
+        if(bluetoothMedia!=null){
+            bluetoothMedia.stop();
+            bluetoothMedia=null;
+        }
         active=null;
         handler.removeCallbacksAndMessages(null);
         if(floorReceiver!=null)try{unregisterReceiver(floorReceiver);}catch(Exception ignored){}
