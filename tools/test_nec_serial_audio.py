@@ -157,7 +157,37 @@ async def main():
     await until(lambda: relay.turn_kind == "", timeout=3)
     print("PASS: long AI yields within 4s then resumes without lost frames")
 
-    assert (await health_endpoint())["connected_devices"] == 3
+    # Simultaneous microphone requests are serialized, not broadcast together.
+    a.control.clear()
+    b.control.clear()
+    await a.text({"type": "ptt_request", "name": "今店1"})
+    await until(lambda: bool(a.seen("ptt_granted")))
+    await b.text({"type": "ptt_request", "name": "福成2"})
+    await asyncio.sleep(0.10)
+    assert not b.seen("ptt_granted")
+    await a.text({"type": "ptt_release"})
+    await until(lambda: bool(b.seen("ptt_granted")), timeout=3)
+    await b.text({"type": "ptt_release"})
+    await until(lambda: relay.turn_kind == "", timeout=3)
+    print("PASS: two modern phones cannot speak simultaneously")
+
+    # Pending request cancelled before permission must never grant later.
+    a.control.clear()
+    b.control.clear()
+    await a.text({"type": "ptt_request", "name": "今店1"})
+    await until(lambda: bool(a.seen("ptt_granted")))
+    await b.text({"type": "ptt_request", "name": "福成2"})
+    await asyncio.sleep(0.06)
+    await b.text({"type": "ptt_release"})
+    await asyncio.sleep(0.06)
+    await a.text({"type": "ptt_release"})
+    await until(lambda: relay.turn_kind == "", timeout=3)
+    assert not b.seen("ptt_granted"), "Cancelled request was granted"
+    print("PASS: cancelled requests do not play later")
+
+    health = await health_endpoint()
+    assert health["connected_devices"] == 3
+    assert "floor_speaker" not in health, "Public health leaked names"
     for ws in devices:
         await ws.disconnect()
     await asyncio.wait_for(asyncio.gather(*tasks), 3)
