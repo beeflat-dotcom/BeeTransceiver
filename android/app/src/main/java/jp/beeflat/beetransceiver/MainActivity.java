@@ -233,7 +233,7 @@ public class MainActivity extends Activity {
         bgTitle.setTextSize(17);
         root.addView(bgTitle,new LinearLayout.LayoutParams(-1,-2));
         TextView bgInfo=new TextView(this);
-        bgInfo.setText("初回のみユーザー補助の許可が必要です。待機を開始してからアプリを閉じてください。画面OFFで使えるボタンは端末によって異なります。");
+        bgInfo.setText("Bluetoothイヤホンの再生／停止ボタンは、待機を開始するだけで試せます。側面ボタン2個を使う場合のみユーザー補助を許可してください。画面OFFの動作は機種によって異なります。");
         bgInfo.setTextSize(12);
         root.addView(bgInfo,new LinearLayout.LayoutParams(-1,-2));
         backgroundStatus=new TextView(this);
@@ -244,6 +244,13 @@ public class MainActivity extends Activity {
         backgroundButton.setOnClickListener(v->toggleBackgroundPtt());
         root.addView(backgroundButton,new LinearLayout.LayoutParams(-1,-2));
         refreshBackgroundStatus();
+
+        Button sideKeySettings=new Button(this);
+        sideKeySettings.setText("側面ボタン用のユーザー補助設定（必要な端末のみ）");
+        sideKeySettings.setAllCaps(false);
+        sideKeySettings.setOnClickListener(v->startActivity(
+                new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)));
+        root.addView(sideKeySettings,new LinearLayout.LayoutParams(-1,-2));
 
         supportButton=new Button(this);supportButton.setTextSize(21);supportButton.setAllCaps(false);root.addView(supportButton,new LinearLayout.LayoutParams(-1,-2));supportButton.setOnClickListener(v->toggleSupportRecording());updateSupportButton(SupportRecordingService.isRunning());
 
@@ -336,23 +343,13 @@ public class MainActivity extends Activity {
         boolean armed=HardwarePttTalkService.isArmed();
         backgroundButton.setText(armed?"バックグラウンド発信の待機を終了"
                 :"バックグラウンド発信の待機を開始");
-        backgroundStatus.setText(armed?"待機中：物理ボタン2個を利用できます"
-                :"停止中：ユーザー補助設定とマイク権限が必要です");
+        backgroundStatus.setText(armed?"待機中：Bluetooth再生／停止ボタン・登録済み側面ボタン"
+                :"停止中：Bluetoothではマイク権限のみ必要（側面ボタンはユーザー補助も必要）");
     }
 
     private void toggleBackgroundPtt(){
         if(HardwarePttTalkService.isArmed()){
             HardwarePttTalkService.disarm(this);
-            return;
-        }
-        if(!HardwarePttAccessibilityService.isEnabled(this)){
-            new AlertDialog.Builder(this).setTitle("物理ボタンのバックグラウンド利用")
-                    .setMessage("Androidのユーザー補助設定で「びー・トランシーバー」の物理ボタン発信を許可してください。"
-                    +"初回のみ設定が必要です。もし有効化が制限されている場合は、アプリ情報の「制限付き設定を許可」を確認してください。"
-                    +"物理ボタン以外の画面情報は取得しません。")
-                    .setPositiveButton("ユーザー補助設定を開く",(d,w)->
-                            startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)))
-                    .setNegativeButton("取消",null).show();
             return;
         }
         if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){
