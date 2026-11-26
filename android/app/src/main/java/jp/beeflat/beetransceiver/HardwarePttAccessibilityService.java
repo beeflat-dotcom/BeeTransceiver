@@ -13,7 +13,13 @@ import android.view.accessibility.AccessibilityEvent;
  */
 public final class HardwarePttAccessibilityService extends AccessibilityService {
     @Override protected boolean onKeyEvent(KeyEvent event) {
-        if (event == null || !HardwarePttTalkService.isArmed() || MainActivity.isForeground()) return false;
+        if (event == null) return false;
+        if (ButtonInputDiagnostics.isActive(this)) {
+            ButtonInputDiagnostics.recordKey(this,"ユーザー補助",event);
+            // Diagnostics are read-only: never steal keys from other apps.
+            return false;
+        }
+        if (!HardwarePttTalkService.isArmed() || MainActivity.isForeground()) return false;
         if (getSharedPreferences("bee_transceiver", MODE_PRIVATE).getBoolean("ptt_learning", false))
             return false;
         // MediaSession handles standard Bluetooth headset keys while armed.

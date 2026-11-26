@@ -98,6 +98,13 @@ public class MainActivity extends Activity {
     static boolean isForeground(){return foreground;}
     private Button backgroundButton;
     private TextView backgroundStatus;
+    private TextView inputDiagnosticsView;
+    private Button inputDiagnosticsButton;
+    private final BroadcastReceiver inputDiagnosticsReceiver=new BroadcastReceiver(){
+        @Override public void onReceive(Context c,Intent i){
+            refreshInputDiagnostics();
+        }
+    };
     private boolean pttHeld=false;
     private boolean transmissionReady=false;
     private int learningSlot=-1;
@@ -227,6 +234,42 @@ public class MainActivity extends Activity {
         root.addView(bindNote,new LinearLayout.LayoutParams(-1,-2));
         refreshHardwareLabels();
 
+        TextView diagnosticsTitle=new TextView(this);
+        diagnosticsTitle.setText("ボタン入力の診断（文字入力・音声は記録しません）");
+        diagnosticsTitle.setTextSize(17);
+        diagnosticsTitle.setTextColor(Color.BLACK);
+        root.addView(diagnosticsTitle,new LinearLayout.LayoutParams(-1,-2));
+        inputDiagnosticsView=new TextView(this);
+        inputDiagnosticsView.setTextSize(13);
+        inputDiagnosticsView.setTextColor(Color.DKGRAY);
+        inputDiagnosticsView.setTextIsSelectable(true);
+        root.addView(inputDiagnosticsView,new LinearLayout.LayoutParams(-1,-2));
+        inputDiagnosticsButton=new Button(this);
+        inputDiagnosticsButton.setAllCaps(false);
+        inputDiagnosticsButton.setOnClickListener(v->toggleInputDiagnostics());
+        root.addView(inputDiagnosticsButton,new LinearLayout.LayoutParams(-1,-2));
+        LinearLayout diagAssign=new LinearLayout(this);
+        diagAssign.setOrientation(LinearLayout.HORIZONTAL);
+        for(int slot=0;slot<HardwarePttBindings.SLOTS;slot++){
+            final int index=slot;
+            Button assign=new Button(this);
+            assign.setAllCaps(false);
+            assign.setText("検出ボタンを"+(index+1)+"に登録");
+            assign.setTextSize(12);
+            assign.setOnClickListener(v->assignDiagnosedKey(index));
+            diagAssign.addView(assign,new LinearLayout.LayoutParams(0,-2,1f));
+        }
+        root.addView(diagAssign,new LinearLayout.LayoutParams(-1,-2));
+        Button clearDiag=new Button(this);
+        clearDiag.setText("診断履歴を消去");
+        clearDiag.setAllCaps(false);
+        clearDiag.setOnClickListener(v->{
+            ButtonInputDiagnostics.clear(this);
+            refreshInputDiagnostics();
+        });
+        root.addView(clearDiag,new LinearLayout.LayoutParams(-1,-2));
+        refreshInputDiagnostics();
+
         TextView bgTitle=new TextView(this);
         bgTitle.setText("画面を閉じた状態で物理発信");
         bgTitle.setTextColor(Color.BLACK);
@@ -266,6 +309,49 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,dp(118));p.setMargins(dp(12),dp(4),dp(12),dp(10));
         shell.addView(pttButton,p);
         setContentView(shell);
+    }
+
+    private void refreshInputDiagnostics(){
+        if(inputDiagnosticsView!=null)
+            inputDiagnosticsView.setText(ButtonInputDiagnostics.report(this));
+        if(inputDiagnosticsButton!=null)
+            inputDiagnosticsButton.setText(ButtonInputDiagnostics.isActive(this)
+                    ?"診断を終了" : "90秒間のボタン検出を開始");
+    }
+
+    private void toggleInputDiagnostics(){
+        if(ButtonInputDiagnostics.isActive(this)){
+            ButtonInputDiagnostics.stop(this);
+            refreshInputDiagnostics();
+            return;
+        }
+        if(pttHeld || HardwarePttTalkService.isTalking()){
+            Toast.makeText(this,"現在の発信を終了してから診断してください",Toast.LENGTH_LONG).show();
+            return;
+        }
+        ButtonInputDiagnostics.start(this);
+        refreshInputDiagnostics();
+        if(!HardwarePttTalkService.isArmed()){
+            new AlertDialog.Builder(this)
+                    .setTitle("ボタン診断を開始しました")
+                    .setMessage("通常キーはここで記録できます。Bluetoothの再生／停止ボタンも確認するには、先に「バックグラウンド発信の待機を開始」を押してください。診断中は発信しません。ユーザー補助経由の入力を見るには設定を有効にしてください。")
+                    .setPositiveButton("OK",null).show();
+        }
+        mainHandler.postDelayed(this::refreshInputDiagnostics,ButtonInputDiagnostics.DURATION_MS+200L);
+    }
+
+    private void assignDiagnosedKey(int slot){
+        HardwarePttBindings.Binding candidate=ButtonInputDiagnostics.lastCandidate(this);
+        if(candidate==null){
+            Toast.makeText(this,"登録できるボタンが検出されていません",Toast.LENGTH_LONG).show();
+            return;
+        }
+        if(!HardwarePttBindings.save(this,slot,candidate)){
+            Toast.makeText(this,"別の枠の登録と重複しています",Toast.LENGTH_LONG).show();
+            return;
+        }
+        refreshHardwareLabels();
+        Toast.makeText(this,"検出したボタンを発信ボタン"+(slot+1)+"に登録しました",Toast.LENGTH_LONG).show();
     }
 
     private void refreshHardwareLabels(){
@@ -317,6 +403,8 @@ public class MainActivity extends Activity {
 
     @Override public boolean dispatchKeyEvent(KeyEvent event){
         if(event!=null){
+            ButtonInputDiagnostics.recordKey(this,"アプリ画面",event);
+            if(ButtonInputDiagnostics.isActive(this))return super.dispatchKeyEvent(event);
             int action=event.getAction();
             if(learningSlot>=0 && action==KeyEvent.ACTION_DOWN && event.getRepeatCount()==0){
                 HardwarePttBindings.Binding candidate=HardwarePttBindings.fromEvent(event);
@@ -477,6 +565,8 @@ public class MainActivity extends Activity {
     @Override protected void onStart(){
         super.onStart();
         foreground=true;
+        registerAppReceiver(inputDiagnosticsReceiver,ButtonInputDiagnostics.ACTION_UPDATED);
+        refreshInputDiagnostics();
         registerAppReceiver(backgroundReceiver,HardwarePttTalkService.ACTION_CHANGED);
         refreshBackgroundStatus();
         registerAppReceiver(internetStateReceiver,InternetPttRelay.ACTION_STATUS);
@@ -493,6 +583,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onStop(){
         foreground=false;
+        try{unregisterReceiver(inputDiagnosticsReceiver);}catch(Exception ignored){}
         try{unregisterReceiver(backgroundReceiver);}catch(Exception ignored){}
         learningSlot=-1;
         pendingHardwareButton=null;

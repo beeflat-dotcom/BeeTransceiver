@@ -22,6 +22,7 @@ final class BluetoothMediaPtt {
         KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE
     };
     private final MediaSession session;
+    private final Context context;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable onPress;
     private long lastPressAt = -10000L;
@@ -29,6 +30,7 @@ final class BluetoothMediaPtt {
     private int seen = 0;
 
     BluetoothMediaPtt(Context context, Runnable onPress) {
+        this.context=context.getApplicationContext();
         this.onPress = onPress;
         session = new MediaSession(context.getApplicationContext(), "BeeBluetoothPtt");
         session.setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS
@@ -37,7 +39,10 @@ final class BluetoothMediaPtt {
             @Override public boolean onMediaButtonEvent(Intent event) {
                 KeyEvent key = event == null ? null : (KeyEvent) event.getParcelableExtra(
                         Intent.EXTRA_KEY_EVENT);
-                if (key == null || !isSupported(key.getKeyCode())) return false;
+                if (key != null) ButtonInputDiagnostics.recordKey(context, "MediaSession", key);
+                if (key == null) return false;
+                boolean registered=HardwarePttBindings.find(context,key)>=0;
+                if (!isSupported(key.getKeyCode()) && !registered) return false;
                 if (key.getAction() == KeyEvent.ACTION_DOWN && key.getRepeatCount() == 0) {
                     pressed("key");
                 }
@@ -45,9 +50,11 @@ final class BluetoothMediaPtt {
                 return true;
             }
             @Override public void onPlay() {
+                ButtonInputDiagnostics.recordTransport(context,"MediaSession:onPlay");
                 pressed("play");
             }
             @Override public void onPause() {
+                ButtonInputDiagnostics.recordTransport(context,"MediaSession:onPause");
                 pressed("pause");
             }
         }, handler);
@@ -77,7 +84,7 @@ final class BluetoothMediaPtt {
     }
 
     private void pressed(String source) {
-        if (!started || MainActivity.isForeground()) return;
+        if (!started || ButtonInputDiagnostics.isActive(context) || MainActivity.isForeground()) return;
         long now = SystemClock.elapsedRealtime();
         // Some headsets dispatch a PLAY and MEDIA_BUTTON event for one press.
         if (now - lastPressAt < 550L) return;
