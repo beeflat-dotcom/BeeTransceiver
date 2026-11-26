@@ -203,7 +203,6 @@ patch('''            "audio_dropped_packets": relay.audio_dropped_packets,
 '''            "audio_dropped_packets": relay.audio_dropped_packets,
             "legacy_dropped_packets": relay.legacy_dropped_packets,
             "floor_type": relay.turn_kind or "idle",
-            "floor_speaker": relay.turn_name,
             "floor_waiting": relay.waiting_humans,
             "floor_control": True,
             "last_audio_playback": relay.last_audio_playback,''', 'health')
