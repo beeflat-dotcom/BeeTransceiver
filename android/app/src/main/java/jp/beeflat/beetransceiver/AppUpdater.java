@@ -286,8 +286,11 @@ final class AppUpdater {
     private static void verifyUpdateIdentity(Activity activity, File apk,
                                              int expectedVersionCode) throws Exception {
         PackageManager manager = activity.getPackageManager();
+        // Some Android 13 builds do not populate signingInfo for APK archives
+        // unless legacy signature metadata is also requested.
         int flags = Build.VERSION.SDK_INT >= 28
-                ? PackageManager.GET_SIGNING_CERTIFICATES : PackageManager.GET_SIGNATURES;
+                ? PackageManager.GET_SIGNING_CERTIFICATES | PackageManager.GET_SIGNATURES
+                : PackageManager.GET_SIGNATURES;
         PackageInfo installed = manager.getPackageInfo(activity.getPackageName(), flags);
         PackageInfo proposed = manager.getPackageArchiveInfo(apk.getAbsolutePath(), flags);
         if (proposed == null) {
@@ -314,6 +317,15 @@ final class AppUpdater {
                     : installed.signingInfo.getApkContentsSigners();
             newSigners = proposed.signingInfo == null ? null
                     : proposed.signingInfo.getApkContentsSigners();
+            // Android 13 OEM variants can return null archive signingInfo.
+            // Use PackageManager's legacy signature metadata as a fallback,
+            // never treating missing metadata as a successful verification.
+            if (oldSigners == null || oldSigners.length == 0) {
+                oldSigners = installed.signatures;
+            }
+            if (newSigners == null || newSigners.length == 0) {
+                newSigners = proposed.signatures;
+            }
         } else {
             oldSigners = installed.signatures;
             newSigners = proposed.signatures;
