@@ -40,7 +40,9 @@ final class BluetoothMediaPtt {
                 KeyEvent key = event == null ? null : (KeyEvent) event.getParcelableExtra(
                         Intent.EXTRA_KEY_EVENT);
                 if (key != null) ButtonInputDiagnostics.recordKey(context, "MediaSession", key);
-                if (key == null || !isSupported(key.getKeyCode())) return false;
+                if (key == null) return false;
+                boolean registered=HardwarePttBindings.find(context,key)>=0;
+                if (!isSupported(key.getKeyCode()) && !registered) return false;
                 if (key.getAction() == KeyEvent.ACTION_DOWN && key.getRepeatCount() == 0) {
                     pressed("key");
                 }
