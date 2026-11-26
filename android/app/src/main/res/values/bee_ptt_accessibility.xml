@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="bee_ptt_accessibility_description">登録済みの物理発信ボタン2個だけを検知して、画面を閉じた状態でもトランシーバーの発信を開始・終了します。画面情報や文字入力は読み取りません。明示的に待機を開始したときのみ有効です。</string>
+</resources>

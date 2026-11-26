@@ -94,13 +94,21 @@ public class MainActivity extends Activity {
     private final Handler mainHandler=new Handler(Looper.getMainLooper());
 
     private AudioEngine engine;private TextView statusView,speakerView,rosterView;private Button pttButton,supportButton,updateButton;private EditText nameEdit,serverUrlEdit;private CheckBox mobileUploadCheck;private SharedPreferences prefs;
+    private static volatile boolean foreground=false;
+    static boolean isForeground(){return foreground;}
+    private Button backgroundButton;
+    private TextView backgroundStatus;
     private boolean pttHeld=false;
+    private boolean transmissionReady=false;
     private int learningSlot=-1;
     private HardwarePttBindings.Binding pendingHardwareButton;
     private final TextView[] hardwareLabels=new TextView[HardwarePttBindings.SLOTS];
     private final Runnable pttTimeout=()->stopPtt();
-    private final BroadcastReceiver pttReadyReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){if(pttHeld)playReadyTone();}};
+    private final BroadcastReceiver pttReadyReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){if(pttHeld)acknowledgePttReady();}};
 
+    private final BroadcastReceiver backgroundReceiver=new BroadcastReceiver(){
+        @Override public void onReceive(Context c,Intent i){refreshBackgroundStatus();}
+    };
     private final BroadcastReceiver internetStateReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){String status=i.getStringExtra(InternetPttRelay.EXTRA_STATUS);if(statusView!=null&&status!=null)statusView.setText(status);}};
     private final BroadcastReceiver floorStateReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){
         String name=i.getStringExtra(InternetPttRelay.EXTRA_NAME);
@@ -126,7 +134,7 @@ public class MainActivity extends Activity {
     }};
     private final BroadcastReceiver supportStateReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){if(SupportRecordingService.ACTION_STATE.equals(i.getAction()))updateSupportButton(i.getBooleanExtra(SupportRecordingService.EXTRA_RUNNING,false));}};
 
-    @Override protected void onCreate(Bundle b){super.onCreate(b);setVolumeControlStream(AudioManager.STREAM_MUSIC);prefs=getSharedPreferences(PREFS,MODE_PRIVATE);buildUi();engine=new AudioEngine(this,new AudioEngine.Listener(){public void onStatus(String t){mainHandler.post(()->statusView.setText(t));}public void onReady(){mainHandler.post(()->{if(pttHeld)playReadyTone();});}public void onSaved(String p){mainHandler.post(()->Toast.makeText(MainActivity.this,"音声ログ保存・送信待ち: "+p,Toast.LENGTH_LONG).show());}public void onError(String m){mainHandler.post(()->{statusView.setText("エラー: "+m);Toast.makeText(MainActivity.this,m,Toast.LENGTH_LONG).show();});}});try{PttReceiverService.start(this);}catch(RuntimeException e){BeeLog.write(this,"ptt_start_error",e.toString());statusView.setText("受信起動エラー: "+e.getClass().getSimpleName());}AudioUploader.schedule(this);}
+    @Override protected void onCreate(Bundle b){super.onCreate(b);setVolumeControlStream(AudioManager.STREAM_MUSIC);prefs=getSharedPreferences(PREFS,MODE_PRIVATE);buildUi();engine=new AudioEngine(this,new AudioEngine.Listener(){public void onStatus(String t){mainHandler.post(()->statusView.setText(t));}public void onReady(){mainHandler.post(()->{if(pttHeld)acknowledgePttReady();});}public void onSaved(String p){mainHandler.post(()->Toast.makeText(MainActivity.this,"音声ログ保存・送信待ち: "+p,Toast.LENGTH_LONG).show());}public void onError(String m){mainHandler.post(()->{statusView.setText("エラー: "+m);Toast.makeText(MainActivity.this,m,Toast.LENGTH_LONG).show();});}});try{PttReceiverService.start(this);}catch(RuntimeException e){BeeLog.write(this,"ptt_start_error",e.toString());statusView.setText("受信起動エラー: "+e.getClass().getSimpleName());}AudioUploader.schedule(this);}
 
     private void buildUi(){int pad=dp(18);LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setPadding(pad,pad,pad,pad);root.setGravity(Gravity.CENTER_HORIZONTAL);root.setBackgroundColor(Color.rgb(250,250,250));
 
@@ -219,6 +227,24 @@ public class MainActivity extends Activity {
         root.addView(bindNote,new LinearLayout.LayoutParams(-1,-2));
         refreshHardwareLabels();
 
+        TextView bgTitle=new TextView(this);
+        bgTitle.setText("画面を閉じた状態で物理発信");
+        bgTitle.setTextColor(Color.BLACK);
+        bgTitle.setTextSize(17);
+        root.addView(bgTitle,new LinearLayout.LayoutParams(-1,-2));
+        TextView bgInfo=new TextView(this);
+        bgInfo.setText("初回のみユーザー補助の許可が必要です。待機を開始してからアプリを閉じてください。画面OFFで使えるボタンは端末によって異なります。");
+        bgInfo.setTextSize(12);
+        root.addView(bgInfo,new LinearLayout.LayoutParams(-1,-2));
+        backgroundStatus=new TextView(this);
+        backgroundStatus.setTextSize(14);
+        root.addView(backgroundStatus,new LinearLayout.LayoutParams(-1,-2));
+        backgroundButton=new Button(this);
+        backgroundButton.setAllCaps(false);
+        backgroundButton.setOnClickListener(v->toggleBackgroundPtt());
+        root.addView(backgroundButton,new LinearLayout.LayoutParams(-1,-2));
+        refreshBackgroundStatus();
+
         supportButton=new Button(this);supportButton.setTextSize(21);supportButton.setAllCaps(false);root.addView(supportButton,new LinearLayout.LayoutParams(-1,-2));supportButton.setOnClickListener(v->toggleSupportRecording());updateSupportButton(SupportRecordingService.isRunning());
 
         pttButton=new Button(this);pttButton.setText("押して話す（最大20秒）");pttButton.setTextSize(28);pttButton.setAllCaps(false);pttButton.setGravity(Gravity.CENTER);LinearLayout.LayoutParams plp=new LinearLayout.LayoutParams(-1,0,1f);plp.topMargin=dp(12);plp.bottomMargin=dp(10);
@@ -255,6 +281,7 @@ public class MainActivity extends Activity {
             return;
         }
         learningSlot=slot;
+        prefs.edit().putBoolean("ptt_learning",true).apply();
         pendingHardwareButton=null;
         nameEdit.clearFocus();
         refreshHardwareLabels();
@@ -275,6 +302,7 @@ public class MainActivity extends Activity {
             return;
         }
         learningSlot=-1;
+        prefs.edit().putBoolean("ptt_learning",false).apply();
         pendingHardwareButton=null;
         refreshHardwareLabels();
         Toast.makeText(this,"物理発信ボタン"+(slot+1)+"を保存しました",Toast.LENGTH_SHORT).show();
@@ -303,12 +331,53 @@ public class MainActivity extends Activity {
         return super.dispatchKeyEvent(event);
     }
 
+    private void refreshBackgroundStatus(){
+        if(backgroundButton==null || backgroundStatus==null)return;
+        boolean armed=HardwarePttTalkService.isArmed();
+        backgroundButton.setText(armed?"バックグラウンド発信の待機を終了"
+                :"バックグラウンド発信の待機を開始");
+        backgroundStatus.setText(armed?"待機中：物理ボタン2個を利用できます"
+                :"停止中：ユーザー補助設定とマイク権限が必要です");
+    }
+
+    private void toggleBackgroundPtt(){
+        if(HardwarePttTalkService.isArmed()){
+            HardwarePttTalkService.disarm(this);
+            return;
+        }
+        if(!HardwarePttAccessibilityService.isEnabled(this)){
+            new AlertDialog.Builder(this).setTitle("物理ボタンのバックグラウンド利用")
+                    .setMessage("Androidのユーザー補助設定で「びー・トランシーバー」の物理ボタン発信を許可してください。"
+                    +"初回のみ設定が必要です。もし有効化が制限されている場合は、アプリ情報の「制限付き設定を許可」を確認してください。"
+                    +"物理ボタン以外の画面情報は取得しません。")
+                    .setPositiveButton("ユーザー補助設定を開く",(d,w)->
+                            startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)))
+                    .setNegativeButton("取消",null).show();
+            return;
+        }
+        if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},REQ_RECORD_AUDIO);
+            return;
+        }
+        saveSettings();
+        try{
+            HardwarePttTalkService.arm(this);
+            backgroundStatus.setText("待機サービスを起動中…");
+        }catch(RuntimeException error){
+            backgroundStatus.setText("待機開始に失敗："+error.getClass().getSimpleName());
+        }
+    }
+
     private void togglePtt(){
+        if(HardwarePttTalkService.isTalking()){
+            Toast.makeText(this,"物理ボタン発信中です。発信を終了してから操作してください",Toast.LENGTH_LONG).show();
+            return;
+        }
         if(pttHeld){stopPtt();return;}
         if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},REQ_RECORD_AUDIO);return;
         }
-        saveSettings();pttHeld=true;
+        saveSettings();pttHeld=true;transmissionReady=false;
         mainHandler.removeCallbacks(pttTimeout);
         mainHandler.postDelayed(pttTimeout,20000L);
         int mode=InternetPttRelay.requestTalk(currentDeviceName());
@@ -322,22 +391,20 @@ public class MainActivity extends Activity {
     }
 
     private void stopPtt(){
-        pttHeld=false;
+        boolean shouldPlayEnd=pttHeld && transmissionReady;
+        pttHeld=false;transmissionReady=false;
         mainHandler.removeCallbacks(pttTimeout);
         InternetPttRelay.releaseTalk();
         if(SupportRecordingService.isRunning())SupportRecordingService.pttStop(this);
         if(engine!=null)engine.stopTransmit();
         if(pttButton!=null)pttButton.setText("押して話す（最大20秒）");
+        if(shouldPlayEnd)PttStartCue.playEnd(this);
     }
 
-    private void playReadyTone(){
-        ToneGenerator generator=null;
-        try{
-            generator=new ToneGenerator(AudioManager.STREAM_MUSIC,70);
-            generator.startTone(ToneGenerator.TONE_PROP_BEEP,130);
-            final ToneGenerator tone=generator;
-            mainHandler.postDelayed(tone::release,400L);
-        }catch(RuntimeException ex){if(generator!=null)generator.release();}
+    private void acknowledgePttReady(){
+        if(!pttHeld || transmissionReady)return;
+        transmissionReady=true;
+        PttStartCue.play(this);
     }
 
     private void startTransmitting(){
@@ -412,6 +479,9 @@ public class MainActivity extends Activity {
 
     @Override protected void onStart(){
         super.onStart();
+        foreground=true;
+        registerAppReceiver(backgroundReceiver,HardwarePttTalkService.ACTION_CHANGED);
+        refreshBackgroundStatus();
         registerAppReceiver(internetStateReceiver,InternetPttRelay.ACTION_STATUS);
         registerAppReceiver(floorStateReceiver,InternetPttRelay.ACTION_FLOOR);
         registerAppReceiver(talkResultReceiver,InternetPttRelay.ACTION_TALK);
@@ -425,8 +495,11 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onStop(){
+        foreground=false;
+        try{unregisterReceiver(backgroundReceiver);}catch(Exception ignored){}
         learningSlot=-1;
         pendingHardwareButton=null;
+        prefs.edit().putBoolean("ptt_learning",false).apply();
         refreshHardwareLabels();
         try{unregisterReceiver(supportStateReceiver);}catch(Exception ignored){}
         try{unregisterReceiver(pttReadyReceiver);}catch(Exception ignored){}
