@@ -95,7 +95,18 @@ public class MainActivity extends Activity {
 
     private AudioEngine engine;private TextView statusView,speakerView,rosterView;private Button pttButton,supportButton,updateButton;private EditText nameEdit,serverUrlEdit;private CheckBox mobileUploadCheck;private SharedPreferences prefs;
     private static volatile boolean foreground=false;
+    private static volatile MainActivity visibleInstance;
     static boolean isForeground(){return foreground;}
+
+    static boolean toggleFromMediaKey(){
+        MainActivity activity=visibleInstance;
+        if(activity==null || !foreground || activity.isFinishing())return false;
+        activity.mainHandler.post(()->{
+            if(foreground && visibleInstance==activity && !ButtonInputDiagnostics.isActive(activity))
+                activity.togglePtt();
+        });
+        return true;
+    }
     private Button backgroundButton;
     private TextView backgroundStatus;
     private TextView inputDiagnosticsView;
@@ -419,7 +430,13 @@ public class MainActivity extends Activity {
             if(learningSlot<0 &&
                     (action==KeyEvent.ACTION_DOWN || action==KeyEvent.ACTION_UP) &&
                     HardwarePttBindings.find(this,event)>=0){
-                if(action==KeyEvent.ACTION_DOWN && event.getRepeatCount()==0)togglePtt();
+                if(action==KeyEvent.ACTION_DOWN && event.getRepeatCount()==0){
+                    // MediaSession may receive the identical Bluetooth press.
+                    // The shared service gate prevents two PTT toggles.
+                    if(!BluetoothMediaPtt.isSupported(event.getKeyCode())
+                            || !HardwarePttTalkService.mediaKeyFromActivity(this))
+                        togglePtt();
+                }
                 return true;
             }
         }
@@ -564,6 +581,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onStart(){
         super.onStart();
+        visibleInstance=this;
         foreground=true;
         registerAppReceiver(inputDiagnosticsReceiver,ButtonInputDiagnostics.ACTION_UPDATED);
         refreshInputDiagnostics();
@@ -583,6 +601,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onStop(){
         foreground=false;
+        if(visibleInstance==this)visibleInstance=null;
         try{unregisterReceiver(inputDiagnosticsReceiver);}catch(Exception ignored){}
         try{unregisterReceiver(backgroundReceiver);}catch(Exception ignored){}
         learningSlot=-1;

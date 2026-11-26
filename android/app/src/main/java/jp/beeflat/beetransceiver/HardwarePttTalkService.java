@@ -57,6 +57,8 @@ public final class HardwarePttTalkService extends Service {
     private volatile boolean usingSupport=false;
     private volatile String name="";
     private long lastKeyAt=0;
+    // Deduplicate MediaSession and Activity notifications for one physical press.
+    private long lastMediaPressAt=-10000L;
     private AudioRecord audioRecord;
     private Thread audioThread;
     private PowerManager.WakeLock wakeLock;
@@ -91,6 +93,32 @@ public final class HardwarePttTalkService extends Service {
         HardwarePttTalkService service=active;
         if(service!=null && service.armed)
             service.handler.post(()->service.toggle(true));
+    }
+
+    /**
+     * The foreground Activity may see the same media key as MediaSession.
+     * Both paths must use the shared debounce rather than toggle twice.
+     */
+    static boolean mediaKeyFromActivity(Context context){
+        HardwarePttTalkService service=active;
+        if(service==null || !service.armed)return false;
+        service.handler.post(service::handleMediaButtonPress);
+        return true;
+    }
+
+    private void handleMediaButtonPress(){
+        if(!armed || ButtonInputDiagnostics.isActive(this))return;
+        long now=SystemClock.elapsedRealtime();
+        if(now-lastMediaPressAt<600L)return;
+        lastMediaPressAt=now;
+        if(wanting){
+            // A background transmission can be stopped after bringing the app front.
+            toggle(true);
+            return;
+        }
+        if(MainActivity.toggleFromMediaKey())return;
+        // Activity is absent/stopped: use the already-running microphone service.
+        toggle(true);
     }
 
     @Override public void onCreate(){
@@ -142,9 +170,7 @@ public final class HardwarePttTalkService extends Service {
             armed=true;
             try {
                 if(bluetoothMedia==null)
-                    bluetoothMedia=new BluetoothMediaPtt(this,()->{
-                        if(armed)toggle(true);
-                    });
+                    bluetoothMedia=new BluetoothMediaPtt(this,this::handleMediaButtonPress);
                 bluetoothMedia.start();
             }catch(RuntimeException e){
                 BeeLog.write(this,"bt_media_ptt_start_error",e.getClass().getSimpleName());
