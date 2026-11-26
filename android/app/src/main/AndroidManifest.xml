@@ -18,6 +18,17 @@
         </activity>
         <service android:name=".SupportRecordingService" android:exported="false" android:foregroundServiceType="microphone" />
         <service android:name=".PttReceiverService" android:exported="false" android:foregroundServiceType="mediaPlayback" />
+        <service android:name=".HardwarePttTalkService"
+            android:exported="false" android:foregroundServiceType="microphone" />
+        <service android:name=".HardwarePttAccessibilityService"
+            android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data android:name="android.accessibilityservice"
+                android:resource="@xml/bee_ptt_accessibility" />
+        </service>
         <service android:name=".AudioUploadJobService" android:permission="android.permission.BIND_JOB_SERVICE" android:exported="true" />
         <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.fileprovider"
             android:exported="false" android:grantUriPermissions="true">
