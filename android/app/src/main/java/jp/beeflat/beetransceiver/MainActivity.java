@@ -50,6 +50,7 @@ import android.os.Looper;
 import android.view.Gravity;
 
 import android.view.MotionEvent;
+import android.view.KeyEvent;
 
 import android.view.inputmethod.EditorInfo;
 
@@ -94,6 +95,9 @@ public class MainActivity extends Activity {
 
     private AudioEngine engine;private TextView statusView,speakerView,rosterView;private Button pttButton,supportButton,updateButton;private EditText nameEdit,serverUrlEdit;private CheckBox mobileUploadCheck;private SharedPreferences prefs;
     private boolean pttHeld=false;
+    private int learningSlot=-1;
+    private HardwarePttBindings.Binding pendingHardwareButton;
+    private final TextView[] hardwareLabels=new TextView[HardwarePttBindings.SLOTS];
     private final Runnable pttTimeout=()->stopPtt();
     private final BroadcastReceiver pttReadyReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){if(pttHeld)playReadyTone();}};
 
@@ -171,6 +175,50 @@ public class MainActivity extends Activity {
         rosterParams.topMargin=dp(6);rosterParams.bottomMargin=dp(10);
         root.addView(rosterView,rosterParams);
 
+        TextView bindingsTitle=new TextView(this);
+        bindingsTitle.setText("物理発信ボタン（最大2個）");
+        bindingsTitle.setTextSize(17);
+        bindingsTitle.setTextColor(Color.BLACK);
+        LinearLayout.LayoutParams titleParams=new LinearLayout.LayoutParams(-1,-2);
+        titleParams.topMargin=dp(12);
+        root.addView(bindingsTitle,titleParams);
+        for(int slot=0;slot<HardwarePttBindings.SLOTS;slot++){
+            final int index=slot;
+            TextView label=new TextView(this);
+            label.setTextSize(14);
+            label.setTextColor(Color.DKGRAY);
+            hardwareLabels[slot]=label;
+            root.addView(label,new LinearLayout.LayoutParams(-1,-2));
+            LinearLayout line=new LinearLayout(this);
+            line.setOrientation(LinearLayout.HORIZONTAL);
+            Button learn=new Button(this);
+            learn.setText("登録開始");
+            learn.setAllCaps(false);
+            learn.setOnClickListener(v->beginHardwareLearning(index));
+            line.addView(learn,new LinearLayout.LayoutParams(0,-2,1f));
+            Button finish=new Button(this);
+            finish.setText("登録終了");
+            finish.setAllCaps(false);
+            finish.setOnClickListener(v->finishHardwareLearning(index));
+            line.addView(finish,new LinearLayout.LayoutParams(0,-2,1f));
+            Button erase=new Button(this);
+            erase.setText("解除");
+            erase.setAllCaps(false);
+            erase.setOnClickListener(v->{
+                if(learningSlot==index){learningSlot=-1;pendingHardwareButton=null;}
+                HardwarePttBindings.clear(this,index);
+                refreshHardwareLabels();
+                Toast.makeText(this,"ボタン"+(index+1)+"の登録を解除しました",Toast.LENGTH_SHORT).show();
+            });
+            line.addView(erase,new LinearLayout.LayoutParams(0,-2,0.65f));
+            root.addView(line,new LinearLayout.LayoutParams(-1,-2));
+        }
+        TextView bindNote=new TextView(this);
+        bindNote.setText("登録開始 → 物理ボタンを押す → 登録終了。登録済みのどちらでも押すたびに発信開始／終了。アプリ表示中に端末が通知するキーに対応します。");
+        bindNote.setTextSize(12);
+        root.addView(bindNote,new LinearLayout.LayoutParams(-1,-2));
+        refreshHardwareLabels();
+
         supportButton=new Button(this);supportButton.setTextSize(21);supportButton.setAllCaps(false);root.addView(supportButton,new LinearLayout.LayoutParams(-1,-2));supportButton.setOnClickListener(v->toggleSupportRecording());updateSupportButton(SupportRecordingService.isRunning());
 
         pttButton=new Button(this);pttButton.setText("押して話す（最大20秒）");pttButton.setTextSize(28);pttButton.setAllCaps(false);pttButton.setGravity(Gravity.CENTER);LinearLayout.LayoutParams plp=new LinearLayout.LayoutParams(-1,0,1f);plp.topMargin=dp(12);plp.bottomMargin=dp(10);
@@ -185,6 +233,74 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,dp(118));p.setMargins(dp(12),dp(4),dp(12),dp(10));
         shell.addView(pttButton,p);
         setContentView(shell);
+    }
+
+    private void refreshHardwareLabels(){
+        for(int i=0;i<HardwarePttBindings.SLOTS;i++){
+            TextView label=hardwareLabels[i];
+            if(label==null)continue;
+            String status=HardwarePttBindings.describe(HardwarePttBindings.load(this,i));
+            if(learningSlot==i){
+                status=pendingHardwareButton==null
+                        ? "ボタンを押して読み取り中…"
+                        : "検出："+HardwarePttBindings.describe(pendingHardwareButton)+" ／ 登録終了で保存";
+            }
+            label.setText("発信ボタン"+(i+1)+"： "+status);
+        }
+    }
+
+    private void beginHardwareLearning(int slot){
+        if(pttHeld){
+            Toast.makeText(this,"発信を終了してから登録してください",Toast.LENGTH_SHORT).show();
+            return;
+        }
+        learningSlot=slot;
+        pendingHardwareButton=null;
+        nameEdit.clearFocus();
+        refreshHardwareLabels();
+        Toast.makeText(this,"登録する物理ボタンを1回押してください",Toast.LENGTH_LONG).show();
+    }
+
+    private void finishHardwareLearning(int slot){
+        if(learningSlot!=slot){
+            Toast.makeText(this,"この枠の登録開始を押してください",Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if(pendingHardwareButton==null){
+            Toast.makeText(this,"物理ボタンを検出していません",Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if(!HardwarePttBindings.save(this,slot,pendingHardwareButton)){
+            Toast.makeText(this,"別の枠で登録済みです。異なるボタンを押してください",Toast.LENGTH_LONG).show();
+            return;
+        }
+        learningSlot=-1;
+        pendingHardwareButton=null;
+        refreshHardwareLabels();
+        Toast.makeText(this,"物理発信ボタン"+(slot+1)+"を保存しました",Toast.LENGTH_SHORT).show();
+    }
+
+    @Override public boolean dispatchKeyEvent(KeyEvent event){
+        if(event!=null){
+            int action=event.getAction();
+            if(learningSlot>=0 && action==KeyEvent.ACTION_DOWN && event.getRepeatCount()==0){
+                HardwarePttBindings.Binding candidate=HardwarePttBindings.fromEvent(event);
+                if(candidate!=null){
+                    pendingHardwareButton=candidate;
+                    refreshHardwareLabels();
+                    return true;
+                }
+            }
+            if(learningSlot>=0 && action==KeyEvent.ACTION_UP && pendingHardwareButton!=null
+                    && pendingHardwareButton.matches(event))return true;
+            if(learningSlot<0 &&
+                    (action==KeyEvent.ACTION_DOWN || action==KeyEvent.ACTION_UP) &&
+                    HardwarePttBindings.find(this,event)>=0){
+                if(action==KeyEvent.ACTION_DOWN && event.getRepeatCount()==0)togglePtt();
+                return true;
+            }
+        }
+        return super.dispatchKeyEvent(event);
     }
 
     private void togglePtt(){
@@ -309,6 +425,9 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onStop(){
+        learningSlot=-1;
+        pendingHardwareButton=null;
+        refreshHardwareLabels();
         try{unregisterReceiver(supportStateReceiver);}catch(Exception ignored){}
         try{unregisterReceiver(pttReadyReceiver);}catch(Exception ignored){}
         try{unregisterReceiver(internetStateReceiver);}catch(Exception ignored){}
