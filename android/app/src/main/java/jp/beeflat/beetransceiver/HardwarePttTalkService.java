@@ -84,7 +84,12 @@ public final class HardwarePttTalkService extends Service {
     static void toggleFromKey(Context context){
         HardwarePttTalkService service=active;
         if(service!=null && service.armed && !MainActivity.isForeground())
-            service.handler.post(service::toggle);
+            service.handler.post(()->service.toggle(false));
+    }
+    static void toggleFromDirectButton(Context context){
+        HardwarePttTalkService service=active;
+        if(service!=null && service.armed)
+            service.handler.post(()->service.toggle(true));
     }
 
     @Override public void onCreate(){
@@ -142,8 +147,9 @@ public final class HardwarePttTalkService extends Service {
         return START_NOT_STICKY;
     }
 
-    private void toggle(){
+    private void toggle(boolean viaDirectLauncher){
         if(!armed)return;
+        if(!viaDirectLauncher && MainActivity.isForeground())return;
         long now=SystemClock.elapsedRealtime();
         if(now-lastKeyAt<330L)return;
         lastKeyAt=now;
@@ -157,7 +163,6 @@ public final class HardwarePttTalkService extends Service {
             updateStatus("PC音声中継の発言許可が取得できません");
             return;
         }
-        if(MainActivity.isForeground())return;
         name=getSharedPreferences(UploadConfig.PREFS,MODE_PRIVATE).getString("device_name","端末-"+Build.MODEL);
         int mode=InternetPttRelay.requestTalk(name);
         if(mode!=InternetPttRelay.MODE_MANAGED){
