@@ -53,6 +53,7 @@ public final class HardwarePttTalkService extends Service {
     private volatile boolean armed=false;
     private volatile boolean wanting=false;
     private volatile boolean started=false;
+    private volatile boolean transmissionReady=false;
     private volatile boolean usingSupport=false;
     private volatile String name="";
     private long lastKeyAt=0;
@@ -61,6 +62,7 @@ public final class HardwarePttTalkService extends Service {
     private PowerManager.WakeLock wakeLock;
     private final Runnable timeout=this::finish;
     private BroadcastReceiver floorReceiver;
+    private BroadcastReceiver supportReadyReceiver;
 
     static boolean isArmed(){
         HardwarePttTalkService service=active;
@@ -104,6 +106,14 @@ public final class HardwarePttTalkService extends Service {
         IntentFilter filter=new IntentFilter(InternetPttRelay.ACTION_TALK);
         if(Build.VERSION.SDK_INT>=33)registerReceiver(floorReceiver,filter,Context.RECEIVER_NOT_EXPORTED);
         else registerReceiver(floorReceiver,filter);
+        supportReadyReceiver=new BroadcastReceiver(){
+            @Override public void onReceive(Context context, Intent intent){
+                if(wanting && usingSupport)markReady();
+            }
+        };
+        IntentFilter readyFilter=new IntentFilter(SupportRecordingService.ACTION_PTT_READY);
+        if(Build.VERSION.SDK_INT>=33)registerReceiver(supportReadyReceiver,readyFilter,Context.RECEIVER_NOT_EXPORTED);
+        else registerReceiver(supportReadyReceiver,readyFilter);
     }
 
     @Override public int onStartCommand(Intent intent,int flags,int startId){
@@ -156,6 +166,7 @@ public final class HardwarePttTalkService extends Service {
         }
         wanting=true;
         started=false;
+        transmissionReady=false;
         usingSupport=false;
         handler.removeCallbacks(timeout);
         handler.postDelayed(timeout,LIMIT_MS);
@@ -187,7 +198,6 @@ public final class HardwarePttTalkService extends Service {
         AudioRecord record=null;
         AacM4aWriter writer=null;
         AudioStorage.Target target=null;
-        boolean signaled=false;
         try {
             int min=AudioRecord.getMinBufferSize(SAMPLE_RATE,AudioFormat.CHANNEL_IN_MONO,
                     AudioFormat.ENCODING_PCM_16BIT);
@@ -202,10 +212,7 @@ public final class HardwarePttTalkService extends Service {
             writer=target.openWriter();
             record.startRecording();
             if(!wanting || !armed)return;
-            signaled=true;
-            handler.post(()->{
-                if(wanting && armed){PttStartCue.play(this);publish("発信中");}
-            });
+            handler.post(this::markReady);
             UUID id=DeviceIdentity.get(this);
             byte[] label=deviceName.getBytes(StandardCharsets.UTF_8);
             while(label.length>48&&deviceName.length()>0){
@@ -216,7 +223,7 @@ public final class HardwarePttTalkService extends Service {
             int sequence=0;
             // Avoid sending the local start cue into the transmitted microphone.
             long muteUntil=SystemClock.elapsedRealtime()+330L;
-            while(CAPTURING.get() && wanting && SystemClock.elapsedRealtime()>=0){
+            while(CAPTURING.get() && wanting){
                 int len=record.read(samples,0,samples.length,AudioRecord.READ_BLOCKING);
                 if(len<=0)continue;
                 byte[] pcm=new byte[len*2];
@@ -259,12 +266,20 @@ public final class HardwarePttTalkService extends Service {
         }
     }
 
+    private void markReady(){
+        if(!wanting || !armed || transmissionReady)return;
+        transmissionReady=true;
+        PttStartCue.play(this);
+        publish("発信中");
+    }
+
     private void finish(){
         if(!wanting)return;
-        boolean wasStarted=started;
+        boolean wasStarted=transmissionReady;
         boolean wasUsingSupport=usingSupport;
         wanting=false;
         started=false;
+        transmissionReady=false;
         usingSupport=false;
         handler.removeCallbacks(timeout);
         CAPTURING.set(false);
@@ -337,6 +352,7 @@ public final class HardwarePttTalkService extends Service {
         active=null;
         handler.removeCallbacksAndMessages(null);
         if(floorReceiver!=null)try{unregisterReceiver(floorReceiver);}catch(Exception ignored){}
+        if(supportReadyReceiver!=null)try{unregisterReceiver(supportReadyReceiver);}catch(Exception ignored){}
         releaseWakeLock();
         super.onDestroy();
     }
