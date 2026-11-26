@@ -25,5 +25,19 @@ final class PttStartCue {
             }
         });
     }
+    /** Distinct double confirmation when an actual transmission ends. */
+    static void playEnd(Context context) {
+        HANDLER.post(()->{
+            ToneGenerator tone=null;
+            try {
+                tone=new ToneGenerator(AudioManager.STREAM_MUSIC,VOLUME_PERCENT);
+                tone.startTone(ToneGenerator.TONE_PROP_BEEP2,230);
+                final ToneGenerator playing=tone;
+                HANDLER.postDelayed(playing::release,430L);
+            }catch(RuntimeException ignored){
+                if(tone!=null)tone.release();
+            }
+        });
+    }
     private PttStartCue() {}
 }
