@@ -13,8 +13,8 @@ android {
         applicationId compatNetRelease ? 'jp.beeflat.beetransceiver.net' : 'jp.beeflat.beetransceiver.net.stable'
         minSdk 26
         targetSdk 35
-        versionCode compatNetRelease ? 12 : 18
-        versionName compatNetRelease ? '0.9.1' : '0.9.7'
+        versionCode compatNetRelease ? 12 : 19
+        versionName compatNetRelease ? '0.9.1' : '0.9.8'
         manifestPlaceholders = [beeAppLabel: 'びー・トランシーバー']
         buildConfigField 'String','BEE_AUDIO_TOKEN',quotedToken
         buildConfigField 'boolean','BEE_LEGACY_NET_CHANNEL',compatNetRelease ? 'true' : 'false'
