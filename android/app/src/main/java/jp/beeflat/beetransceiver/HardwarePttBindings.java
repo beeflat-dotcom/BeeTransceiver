@@ -134,7 +134,7 @@ final class HardwarePttBindings {
             case KeyEvent.KEYCODE_VOLUME_DOWN:
                 label = "音量－";
                 break;
-            case KeyEvent.KEYCODE_HEADSEThOOK:
+            case KeyEvent.KEYCODE_HEADSET_HOOK:
                 label = "ヘッドセットボタン";
                 break;
             case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
