@@ -95,11 +95,12 @@ public class MainActivity extends Activity {
 
     private AudioEngine engine;private TextView statusView,speakerView,rosterView;private Button pttButton,supportButton,updateButton;private EditText nameEdit,serverUrlEdit;private CheckBox mobileUploadCheck;private SharedPreferences prefs;
     private boolean pttHeld=false;
+    private boolean transmissionReady=false;
     private int learningSlot=-1;
     private HardwarePttBindings.Binding pendingHardwareButton;
     private final TextView[] hardwareLabels=new TextView[HardwarePttBindings.SLOTS];
     private final Runnable pttTimeout=()->stopPtt();
-    private final BroadcastReceiver pttReadyReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){if(pttHeld)playReadyTone();}};
+    private final BroadcastReceiver pttReadyReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){if(pttHeld)acknowledgePttReady();}};
 
     private final BroadcastReceiver internetStateReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){String status=i.getStringExtra(InternetPttRelay.EXTRA_STATUS);if(statusView!=null&&status!=null)statusView.setText(status);}};
     private final BroadcastReceiver floorStateReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){
@@ -126,7 +127,7 @@ public class MainActivity extends Activity {
     }};
     private final BroadcastReceiver supportStateReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){if(SupportRecordingService.ACTION_STATE.equals(i.getAction()))updateSupportButton(i.getBooleanExtra(SupportRecordingService.EXTRA_RUNNING,false));}};
 
-    @Override protected void onCreate(Bundle b){super.onCreate(b);setVolumeControlStream(AudioManager.STREAM_MUSIC);prefs=getSharedPreferences(PREFS,MODE_PRIVATE);buildUi();engine=new AudioEngine(this,new AudioEngine.Listener(){public void onStatus(String t){mainHandler.post(()->statusView.setText(t));}public void onReady(){mainHandler.post(()->{if(pttHeld)playReadyTone();});}public void onSaved(String p){mainHandler.post(()->Toast.makeText(MainActivity.this,"音声ログ保存・送信待ち: "+p,Toast.LENGTH_LONG).show());}public void onError(String m){mainHandler.post(()->{statusView.setText("エラー: "+m);Toast.makeText(MainActivity.this,m,Toast.LENGTH_LONG).show();});}});try{PttReceiverService.start(this);}catch(RuntimeException e){BeeLog.write(this,"ptt_start_error",e.toString());statusView.setText("受信起動エラー: "+e.getClass().getSimpleName());}AudioUploader.schedule(this);}
+    @Override protected void onCreate(Bundle b){super.onCreate(b);setVolumeControlStream(AudioManager.STREAM_MUSIC);prefs=getSharedPreferences(PREFS,MODE_PRIVATE);buildUi();engine=new AudioEngine(this,new AudioEngine.Listener(){public void onStatus(String t){mainHandler.post(()->statusView.setText(t));}public void onReady(){mainHandler.post(()->{if(pttHeld)acknowledgePttReady();});}public void onSaved(String p){mainHandler.post(()->Toast.makeText(MainActivity.this,"音声ログ保存・送信待ち: "+p,Toast.LENGTH_LONG).show());}public void onError(String m){mainHandler.post(()->{statusView.setText("エラー: "+m);Toast.makeText(MainActivity.this,m,Toast.LENGTH_LONG).show();});}});try{PttReceiverService.start(this);}catch(RuntimeException e){BeeLog.write(this,"ptt_start_error",e.toString());statusView.setText("受信起動エラー: "+e.getClass().getSimpleName());}AudioUploader.schedule(this);}
 
     private void buildUi(){int pad=dp(18);LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setPadding(pad,pad,pad,pad);root.setGravity(Gravity.CENTER_HORIZONTAL);root.setBackgroundColor(Color.rgb(250,250,250));
 
@@ -308,7 +309,7 @@ public class MainActivity extends Activity {
         if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},REQ_RECORD_AUDIO);return;
         }
-        saveSettings();pttHeld=true;
+        saveSettings();pttHeld=true;transmissionReady=false;
         mainHandler.removeCallbacks(pttTimeout);
         mainHandler.postDelayed(pttTimeout,20000L);
         int mode=InternetPttRelay.requestTalk(currentDeviceName());
@@ -322,22 +323,20 @@ public class MainActivity extends Activity {
     }
 
     private void stopPtt(){
-        pttHeld=false;
+        boolean shouldPlayEnd=pttHeld && transmissionReady;
+        pttHeld=false;transmissionReady=false;
         mainHandler.removeCallbacks(pttTimeout);
         InternetPttRelay.releaseTalk();
         if(SupportRecordingService.isRunning())SupportRecordingService.pttStop(this);
         if(engine!=null)engine.stopTransmit();
         if(pttButton!=null)pttButton.setText("押して話す（最大20秒）");
+        if(shouldPlayEnd)PttStartCue.playEnd(this);
     }
 
-    private void playReadyTone(){
-        ToneGenerator generator=null;
-        try{
-            generator=new ToneGenerator(AudioManager.STREAM_MUSIC,70);
-            generator.startTone(ToneGenerator.TONE_PROP_BEEP,130);
-            final ToneGenerator tone=generator;
-            mainHandler.postDelayed(tone::release,400L);
-        }catch(RuntimeException ex){if(generator!=null)generator.release();}
+    private void acknowledgePttReady(){
+        if(!pttHeld || transmissionReady)return;
+        transmissionReady=true;
+        PttStartCue.play(this);
     }
 
     private void startTransmitting(){
