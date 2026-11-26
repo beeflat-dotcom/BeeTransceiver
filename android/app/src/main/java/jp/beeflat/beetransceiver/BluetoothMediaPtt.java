@@ -84,7 +84,7 @@ final class BluetoothMediaPtt {
     }
 
     private void pressed(String source) {
-        if (!started || ButtonInputDiagnostics.isActive(context) || MainActivity.isForeground()) return;
+        if (!started || ButtonInputDiagnostics.isActive(context)) return;
         long now = SystemClock.elapsedRealtime();
         // Some headsets dispatch a PLAY and MEDIA_BUTTON event for one press.
         if (now - lastPressAt < 550L) return;
