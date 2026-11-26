@@ -16,6 +16,9 @@ public final class HardwarePttAccessibilityService extends AccessibilityService 
         if (event == null || !HardwarePttTalkService.isArmed() || MainActivity.isForeground()) return false;
         if (getSharedPreferences("bee_transceiver", MODE_PRIVATE).getBoolean("ptt_learning", false))
             return false;
+        // MediaSession handles standard Bluetooth headset keys while armed.
+        // Do not process the same button again through AccessibilityService.
+        if (BluetoothMediaPtt.isSupported(event.getKeyCode())) return false;
         int slot = HardwarePttBindings.find(this, event);
         if (slot < 0) return false;
         int action = event.getAction();
